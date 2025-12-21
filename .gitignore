@@ -100,7 +100,6 @@ mlruns/
 lightning_logs/
 
 # Data files (keep structure but not data)
-data/
 *.npy
 *.npz
 *.pkl
