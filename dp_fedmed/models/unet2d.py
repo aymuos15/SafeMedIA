@@ -10,6 +10,7 @@ from typing import Sequence
 import torch
 import torch.nn as nn
 from monai.networks.nets.unet import UNet
+from typing import cast
 
 
 def create_unet2d(
@@ -96,7 +97,7 @@ def get_parameters(model: nn.Module) -> list:
     """
     # Check if model is wrapped by Opacus GradSampleModule
     if hasattr(model, "_module"):
-        state_dict = model._module.state_dict()
+        state_dict = cast(nn.Module, model._module).state_dict()
     else:
         state_dict = model.state_dict()
 
@@ -110,7 +111,7 @@ def set_parameters(model: nn.Module, parameters: list) -> None:
     """
     # Check if model is wrapped by Opacus GradSampleModule
     if hasattr(model, "_module"):
-        state_dict = model._module.state_dict()
+        state_dict = cast(nn.Module, model._module).state_dict()
     else:
         state_dict = model.state_dict()
 
@@ -121,6 +122,6 @@ def set_parameters(model: nn.Module, parameters: list) -> None:
 
     # Load into appropriate target
     if hasattr(model, "_module"):
-        model._module.load_state_dict(new_state_dict, strict=True)
+        cast(nn.Module, model._module).load_state_dict(new_state_dict, strict=True)
     else:
         model.load_state_dict(new_state_dict, strict=True)

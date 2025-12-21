@@ -8,7 +8,7 @@ NOTE: We use manual training loops instead of MONAI engines because:
 2. MONAI's SupervisedTrainer causes SIGFPE with Opacus per-sample gradient computation
 3. Simple loops are more debuggable for FL + DP use case
 
-Checkpointing is added directly to these functions for both best and last models.
+Checkpointing is handled via the checkpoint module for both best and last models.
 
 Loss functions are now configurable via the [loss] config section. Options:
 - cross_entropy: Standard CrossEntropyLoss (default, most stable with DP)
@@ -25,6 +25,7 @@ from torch.utils.data import DataLoader
 from monai.metrics.meandice import DiceMetric
 
 from dp_fedmed.losses.dice import get_loss_function
+from .checkpoint import save_model_checkpoint
 
 
 def train_one_epoch(
@@ -178,17 +179,7 @@ def _save_training_checkpoint(model: nn.Module, checkpoint_dir: Path) -> None:
         model: Model to checkpoint
         checkpoint_dir: Directory to save to
     """
-    checkpoint_dir = Path(checkpoint_dir)
-    checkpoint_dir.mkdir(parents=True, exist_ok=True)
-
-    # Handle Opacus-wrapped models
-    if hasattr(model, "_module"):
-        state_dict = model._module.state_dict()
-    else:
-        state_dict = model.state_dict()
-
-    # Save last model (overwritten each time)
-    torch.save({"model": state_dict}, checkpoint_dir / "last_model.pt")
+    save_model_checkpoint(model, checkpoint_dir)
 
 
 def _save_eval_checkpoint(
@@ -204,29 +195,16 @@ def _save_eval_checkpoint(
         checkpoint_dir: Directory to save to
     """
     checkpoint_dir = Path(checkpoint_dir)
-    checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
-    # Handle Opacus-wrapped models
-    if hasattr(model, "_module"):
-        state_dict = model._module.state_dict()
-    else:
-        state_dict = model.state_dict()
-
-    # Track best dice in a file
-    best_dice_file = checkpoint_dir / ".best_dice"
+    # Determine if this is the best model by checking existing best checkpoint
     best_dice = 0.0
-    if best_dice_file.exists():
+    best_path = checkpoint_dir / "best_model.pt"
+    if best_path.exists():
         try:
-            best_dice = float(best_dice_file.read_text().strip())
-        except ValueError:
+            checkpoint = torch.load(best_path, map_location="cpu", weights_only=True)
+            best_dice = checkpoint.get("dice", 0.0)
+        except Exception:
             best_dice = 0.0
 
-    # Save best model if improved
-    if dice_score > best_dice:
-        torch.save(
-            {"model": state_dict, "dice": dice_score}, checkpoint_dir / "best_model.pt"
-        )
-        best_dice_file.write_text(str(dice_score))
-
-    # Always save last model
-    torch.save({"model": state_dict}, checkpoint_dir / "last_model.pt")
+    is_best = dice_score > best_dice
+    save_model_checkpoint(model, checkpoint_dir, dice_score=dice_score, is_best=is_best)

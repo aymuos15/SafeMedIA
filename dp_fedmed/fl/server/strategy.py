@@ -10,13 +10,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-import torch
 import flwr as fl
-from flwr.common import Parameters, Scalar, parameters_to_ndarrays
+from flwr.common import Parameters, Scalar
 from flwr.server.strategy import FedAvg
 from loguru import logger
 
 from ...privacy.accountant import PrivacyAccountant
+from ..checkpoint import CheckpointManager
 
 
 class DPFedAvg(FedAvg):
@@ -67,9 +67,9 @@ class DPFedAvg(FedAvg):
         # Per-client metrics: {client_id: [round_metrics]}
         self.client_metrics: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
 
-        # Checkpointing state
+        # Checkpointing via CheckpointManager
         self.checkpoint_dir = self.run_dir / "checkpoints"
-        self.best_dice = 0.0
+        self.checkpoint_manager = CheckpointManager(self.checkpoint_dir, mode="server")
         self.latest_parameters: Optional[Parameters] = None
         self.current_round: int = 0  # Track actual round number
 
@@ -318,30 +318,12 @@ class DPFedAvg(FedAvg):
             logger.warning("No parameters to checkpoint")
             return
 
-        # Ensure checkpoint directory exists
-        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
-
-        # Convert parameters to numpy arrays for saving
-        params_ndarrays = parameters_to_ndarrays(self.latest_parameters)
-
-        # Checkpoint metadata for resumption
-        checkpoint_meta = {
-            "parameters": params_ndarrays,
-            "round": self.current_round,
-            "cumulative_epsilon": self.privacy_accountant.get_cumulative_epsilon(),
-            "dice": current_dice,
-        }
-
-        # Always save last model
-        last_path = self.checkpoint_dir / "last_model.pt"
-        torch.save(checkpoint_meta, last_path)
-
-        # Save best model if improved
-        if current_dice > self.best_dice:
-            self.best_dice = current_dice
-            best_path = self.checkpoint_dir / "best_model.pt"
-            torch.save(checkpoint_meta, best_path)
-            logger.info(f"New best model saved (dice={current_dice:.4f})")
+        self.checkpoint_manager.save(
+            model_or_params=self.latest_parameters,
+            dice_score=current_dice,
+            round_num=self.current_round,
+            cumulative_epsilon=self.privacy_accountant.get_cumulative_epsilon(),
+        )
 
     def save_logs(self) -> None:
         """Save metrics.json and history.json to run directory."""
