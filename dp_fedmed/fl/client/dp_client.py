@@ -34,6 +34,7 @@ class DPFlowerClient(NumPyClient):
         device: torch.device,
         client_id: int = 0,
         run_dir: Path | None = None,
+        loss_config: Dict | None = None,
     ):
         """Initialize the DP Flower client.
 
@@ -46,6 +47,7 @@ class DPFlowerClient(NumPyClient):
             device: Device to train on
             client_id: Client partition ID
             run_dir: Directory to save client metrics
+            loss_config: Loss function configuration
         """
         self.train_loader = train_loader
         self.test_loader = test_loader
@@ -54,6 +56,7 @@ class DPFlowerClient(NumPyClient):
         self.device = device
         self.client_id = client_id
         self.run_dir = run_dir
+        self.loss_config = loss_config or {}
 
         # Track metrics across rounds
         self.round_history = []
@@ -178,6 +181,7 @@ class DPFlowerClient(NumPyClient):
                 train_loader,
                 self.optimizer,
                 self.device,
+                loss_config=self.loss_config,
                 checkpoint_dir=checkpoint_dir,
             )
             total_loss += epoch_loss

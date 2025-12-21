@@ -118,6 +118,7 @@ def client_fn(context: Context) -> fl.client.Client:
     model_config = config.get_section("model")
     training_config = config.get_section("training")
     privacy_config = config.get_section("privacy")
+    loss_config = config.get_section("loss")
 
     # Log privacy settings
     if privacy_config.get("enable_dp", True):
@@ -126,6 +127,10 @@ def client_fn(context: Context) -> fl.client.Client:
         )
     else:
         logger.warning("Privacy: DISABLED")
+
+    # Log loss settings
+    loss_type = loss_config.get("type", "cross_entropy")
+    logger.info(f"Loss function: {loss_type}")
 
     # Create and return client
     return DPFlowerClient(
@@ -137,4 +142,5 @@ def client_fn(context: Context) -> fl.client.Client:
         device=device,
         client_id=partition_id,
         run_dir=run_dir,
+        loss_config=loss_config,
     ).to_client()

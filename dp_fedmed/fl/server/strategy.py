@@ -32,6 +32,7 @@ class DPFedAvg(FedAvg):
         num_rounds: Optional[int] = None,
         noise_multiplier: float = 1.0,
         max_grad_norm: float = 1.0,
+        start_round: int = 1,
         **kwargs,
     ):
         """Initialize DP-aware FedAvg.
@@ -42,9 +43,10 @@ class DPFedAvg(FedAvg):
             run_dir: Directory to save results
             run_name: Name of this run (config name)
             save_metrics: Whether to save metrics to file
-            num_rounds: Total number of rounds
+            num_rounds: Total number of rounds (including completed rounds)
             noise_multiplier: Pre-computed noise multiplier to use for all rounds
             max_grad_norm: Maximum gradient norm for DP clipping
+            start_round: Starting round number (for checkpoint resumption)
             **kwargs: Additional arguments for FedAvg
         """
         super().__init__(**kwargs)
@@ -58,6 +60,7 @@ class DPFedAvg(FedAvg):
         self.num_rounds = num_rounds
         self.noise_multiplier = noise_multiplier
         self.max_grad_norm = max_grad_norm
+        self.start_round = start_round
 
         # Server-level round metrics
         self.server_rounds: List[Dict[str, Any]] = []
@@ -68,19 +71,26 @@ class DPFedAvg(FedAvg):
         self.checkpoint_dir = self.run_dir / "checkpoints"
         self.best_dice = 0.0
         self.latest_parameters: Optional[Parameters] = None
+        self.current_round: int = 0  # Track actual round number
 
         self.start_time = datetime.now().isoformat()
 
         logger.info(
             f"DPFedAvg initialized. Target ε = {target_epsilon}, δ = {target_delta}"
         )
+        if start_round > 1:
+            logger.info(f"Resuming from round {start_round}")
         logger.info(f"Results will be saved to: {self.run_dir.absolute()}")
 
     def configure_fit(self, server_round: int, parameters, client_manager):
         """Configure fit round with pre-computed noise multiplier."""
+        # Calculate actual round number when resuming from checkpoint
+        actual_round = self.start_round + server_round - 1
+        self.current_round = actual_round
+
         config = {
             "noise_multiplier": self.noise_multiplier,
-            "server_round": server_round,
+            "server_round": actual_round,
         }
 
         # Get standard sample
@@ -96,8 +106,11 @@ class DPFedAvg(FedAvg):
 
     def configure_evaluate(self, server_round: int, parameters, client_manager):
         """Configure evaluate round with server_round in config."""
+        # Calculate actual round number when resuming from checkpoint
+        actual_round = self.start_round + server_round - 1
+
         config = {
-            "server_round": server_round,
+            "server_round": actual_round,
         }
 
         # Calculate sample size based on fraction_evaluate
@@ -311,15 +324,23 @@ class DPFedAvg(FedAvg):
         # Convert parameters to numpy arrays for saving
         params_ndarrays = parameters_to_ndarrays(self.latest_parameters)
 
+        # Checkpoint metadata for resumption
+        checkpoint_meta = {
+            "parameters": params_ndarrays,
+            "round": self.current_round,
+            "cumulative_epsilon": self.privacy_accountant.get_cumulative_epsilon(),
+            "dice": current_dice,
+        }
+
         # Always save last model
         last_path = self.checkpoint_dir / "last_model.pt"
-        torch.save({"parameters": params_ndarrays}, last_path)
+        torch.save(checkpoint_meta, last_path)
 
         # Save best model if improved
         if current_dice > self.best_dice:
             self.best_dice = current_dice
             best_path = self.checkpoint_dir / "best_model.pt"
-            torch.save({"parameters": params_ndarrays, "dice": current_dice}, best_path)
+            torch.save(checkpoint_meta, best_path)
             logger.info(f"New best model saved (dice={current_dice:.4f})")
 
     def save_logs(self) -> None:

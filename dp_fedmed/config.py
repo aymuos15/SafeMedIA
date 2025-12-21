@@ -1,104 +1,204 @@
-"""Configuration loading and validation for DP-FedMed."""
+"""Configuration loading and validation for DP-FedMed using Pydantic."""
 
 from pathlib import Path
-from typing import Any, Dict, Union
+from typing import Any, Dict, List, Optional, Union
 
 import tomli
-
 from loguru import logger
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
-class Config:
-    """Configuration manager for DP-FedMed with strict validation."""
+class DataConfig(BaseModel):
+    """Data configuration."""
 
-    def __init__(self, config_dict: Dict[str, Any]):
-        """Initialize configuration with strict validation.
+    model_config = ConfigDict(extra="forbid")
 
-        Args:
-            config_dict: Configuration dictionary from YAML file
+    data_dir: Path
+    image_size: int = Field(default=256, ge=16, le=2048)
+    batch_size: int = Field(default=8, ge=1, le=512)
+    num_workers: int = Field(default=2, ge=0, le=32)
 
-        Raises:
-            ValueError: If required fields are missing or invalid
-        """
-        self._config = config_dict
-        self._validate()
+    @field_validator("data_dir", mode="before")
+    @classmethod
+    def validate_data_dir(cls, v: Any) -> Path:
+        path = Path(v)
+        if not path.exists():
+            raise ValueError(f"data_dir does not exist: {v}")
+        return path
 
-    def _validate(self):
-        """Validate all required fields strictly."""
-        errors = []
 
-        # Required: data.data_dir
-        data_dir = self.get("data.data_dir")
-        if data_dir is None:
-            errors.append("data.data_dir is REQUIRED but not specified in config")
-        elif not Path(data_dir).exists():
-            errors.append(f"data.data_dir does not exist: {data_dir}")
+class ModelConfig(BaseModel):
+    """Model architecture configuration."""
 
-        # Required: data settings with types
-        if not isinstance(self.get("data.image_size"), int):
-            errors.append("data.image_size must be an integer")
-        if not isinstance(self.get("data.batch_size"), int):
-            errors.append("data.batch_size must be an integer")
+    model_config = ConfigDict(extra="forbid")
 
-        # Required: model settings
-        if self.get("model.in_channels") is None:
-            errors.append("model.in_channels is required")
-        if self.get("model.out_channels") is None:
-            errors.append("model.out_channels is required")
-        if not isinstance(self.get("model.channels"), list):
-            errors.append("model.channels must be a list")
-        if not isinstance(self.get("model.strides"), list):
-            errors.append("model.strides must be a list")
+    in_channels: int = Field(default=1, ge=1)
+    out_channels: int = Field(default=2, ge=1)
+    channels: List[int] = Field(default=[16, 32, 64, 128])
+    strides: List[int] = Field(default=[2, 2, 2])
+    num_res_units: int = Field(default=2, ge=0)
+    dropout: float = Field(default=0.0, ge=0.0, le=1.0)
 
-        # Required: federated settings
-        if not isinstance(self.get("federated.num_clients"), int):
-            errors.append("federated.num_clients must be an integer")
-        if not isinstance(self.get("federated.num_rounds"), int):
-            errors.append("federated.num_rounds must be an integer")
+    @field_validator("channels")
+    @classmethod
+    def validate_channels(cls, v: List[int]) -> List[int]:
+        if not v:
+            raise ValueError("channels must not be empty")
+        if any(c < 1 for c in v):
+            raise ValueError("all channel values must be positive")
+        return v
 
-        # Required: training settings
-        if not isinstance(self.get("training.local_epochs"), int):
-            errors.append("training.local_epochs must be an integer")
-        if not isinstance(self.get("training.learning_rate"), (int, float)):
-            errors.append("training.learning_rate must be a number")
-
-        # Required: privacy settings
-        enable_dp = self.get("privacy.enable_dp")
-        if not isinstance(enable_dp, bool):
-            errors.append("privacy.enable_dp must be a boolean (true/false)")
-
-        if enable_dp:
-            # If DP is enabled, validate DP parameters
-            if not isinstance(self.get("privacy.noise_multiplier"), (int, float)):
-                errors.append("privacy.noise_multiplier must be a number")
-            if not isinstance(self.get("privacy.max_grad_norm"), (int, float)):
-                errors.append("privacy.max_grad_norm must be a number")
-            if not isinstance(self.get("privacy.target_epsilon"), (int, float)):
-                errors.append("privacy.target_epsilon must be a number")
-            if not isinstance(self.get("privacy.target_delta"), (int, float)):
-                errors.append("privacy.target_delta must be a number")
-            # Optional but validated if present
-            client_dataset_size = self.get("privacy.client_dataset_size")
-            if client_dataset_size is not None and not isinstance(
-                client_dataset_size, int
-            ):
-                errors.append("privacy.client_dataset_size must be an integer")
-
-        # If any errors, raise them all at once
-        if errors:
-            error_msg = "Configuration validation failed:\n" + "\n".join(
-                f"  ✗ {e}" for e in errors
+    @model_validator(mode="after")
+    def validate_strides_length(self) -> "ModelConfig":
+        if len(self.strides) != len(self.channels) - 1:
+            raise ValueError(
+                f"strides length ({len(self.strides)}) must be "
+                f"channels length - 1 ({len(self.channels) - 1})"
             )
-            raise ValueError(error_msg)
+        return self
 
-        logger.info("✓ Configuration validated successfully")
-        logger.info(f"  Data directory: {data_dir}")
-        logger.info(f"  Clients: {self.get('federated.num_clients')}")
-        logger.info(f"  Rounds: {self.get('federated.num_rounds')}")
-        logger.info(f"  DP enabled: {self.get('privacy.enable_dp')}")
+
+class FederatedConfig(BaseModel):
+    """Federated learning configuration."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    num_clients: int = Field(default=2, ge=1)
+    num_rounds: int = Field(default=5, ge=1)
+    fraction_fit: float = Field(default=1.0, ge=0.0, le=1.0)
+    fraction_evaluate: float = Field(default=1.0, ge=0.0, le=1.0)
+    min_fit_clients: int = Field(default=2, ge=1)
+    min_evaluate_clients: int = Field(default=2, ge=1)
+    min_available_clients: int = Field(default=2, ge=1)
+
+
+class ClientResourcesConfig(BaseModel):
+    """Client resource configuration."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    num_cpus: int = Field(default=1, ge=1)
+    num_gpus: float = Field(default=0.3, ge=0.0, le=8.0)
+
+
+class TrainingConfig(BaseModel):
+    """Training hyperparameters."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    local_epochs: int = Field(default=5, ge=1)
+    learning_rate: float = Field(default=0.001, gt=0.0)
+    optimizer: str = Field(default="sgd")
+    momentum: float = Field(default=0.9, ge=0.0, le=1.0)
+
+    @field_validator("optimizer")
+    @classmethod
+    def validate_optimizer(cls, v: str) -> str:
+        allowed = ["sgd", "adam", "adamw"]
+        if v.lower() not in allowed:
+            raise ValueError(f"optimizer must be one of {allowed}")
+        return v.lower()
+
+
+class PrivacyConfig(BaseModel):
+    """Differential privacy configuration."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enable_dp: bool = True
+    noise_multiplier: float = Field(default=1.0, gt=0.0)
+    max_grad_norm: float = Field(default=1.0, gt=0.0)
+    target_epsilon: float = Field(default=8.0, gt=0.0)
+    target_delta: float = Field(default=1e-5, gt=0.0, lt=1.0)
+    client_dataset_size: Optional[int] = Field(default=None, ge=1)
+
+    @model_validator(mode="after")
+    def validate_dp_params(self) -> "PrivacyConfig":
+        if self.enable_dp:
+            if self.noise_multiplier <= 0:
+                raise ValueError("noise_multiplier must be positive when DP is enabled")
+            if self.max_grad_norm <= 0:
+                raise ValueError("max_grad_norm must be positive when DP is enabled")
+        return self
+
+
+class LossConfig(BaseModel):
+    """Loss function configuration."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: str = Field(default="cross_entropy")
+    dice_smooth: float = Field(default=1.0, ge=0.0)
+    dice_include_background: bool = False
+    dice_weight: float = Field(default=0.5, ge=0.0, le=1.0)
+    ce_weight: float = Field(default=0.5, ge=0.0, le=1.0)
+
+    @field_validator("type")
+    @classmethod
+    def validate_loss_type(cls, v: str) -> str:
+        allowed = ["cross_entropy", "soft_dice", "dice_ce"]
+        if v.lower() not in allowed:
+            raise ValueError(f"loss type must be one of {allowed}")
+        return v.lower()
+
+
+class CheckpointingConfig(BaseModel):
+    """Checkpointing configuration."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    checkpoint_dir: str = "checkpoints"
+    resume_from: Optional[str] = Field(default=None)
+
+    @field_validator("resume_from", mode="before")
+    @classmethod
+    def validate_resume_path(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and v.strip():
+            path = Path(v)
+            if not path.exists():
+                raise ValueError(f"resume_from path does not exist: {v}")
+            return v
+        return None
+
+
+class LoggingConfig(BaseModel):
+    """Logging configuration."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    save_model: bool = True
+    save_metrics: bool = True
+    level: str = Field(default="INFO")
+
+    @field_validator("level")
+    @classmethod
+    def validate_log_level(cls, v: str) -> str:
+        allowed = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
+        if v.upper() not in allowed:
+            raise ValueError(f"log level must be one of {allowed}")
+        return v.upper()
+
+
+class Config(BaseModel):
+    """Root configuration model for DP-FedMed."""
+
+    model_config = ConfigDict(extra="allow")
+
+    data: DataConfig
+    model: ModelConfig
+    federated: FederatedConfig
+    client_resources: ClientResourcesConfig = Field(
+        default_factory=ClientResourcesConfig
+    )
+    training: TrainingConfig
+    privacy: PrivacyConfig
+    loss: LossConfig = Field(default_factory=LossConfig)
+    checkpointing: CheckpointingConfig = Field(default_factory=CheckpointingConfig)
+    logging: LoggingConfig = Field(default_factory=LoggingConfig)
 
     def get(self, key: str, default: Any = None) -> Any:
-        """Get nested config value using dot notation.
+        """Get nested config value using dot notation (backward compatibility).
 
         Args:
             key: Dot-separated key path (e.g., "data.batch_size")
@@ -112,22 +212,24 @@ class Config:
             8
         """
         keys = key.split(".")
-        value = self._config
+        value: Any = self
+
         for k in keys:
-            if isinstance(value, dict):
-                value = value.get(k)
+            if hasattr(value, k):
+                value = getattr(value, k)
+            elif isinstance(value, dict) and k in value:
+                value = value[k]
             else:
                 return default
-            if value is None:
-                return default
+
         return value
 
     def to_dict(self) -> Dict[str, Any]:
         """Return full config as dictionary."""
-        return self._config
+        return self.model_dump()
 
     def get_section(self, section: str) -> Dict[str, Any]:
-        """Get entire configuration section.
+        """Get entire configuration section as dict.
 
         Args:
             section: Section name (e.g., "data", "model", "privacy")
@@ -135,7 +237,11 @@ class Config:
         Returns:
             Dictionary with section contents
         """
-        return self._config.get(section, {})
+        if hasattr(self, section):
+            obj = getattr(self, section)
+            if isinstance(obj, BaseModel):
+                return obj.model_dump()
+        return {}
 
 
 def load_config(config_path: Union[str, Path]) -> Config:
@@ -149,7 +255,7 @@ def load_config(config_path: Union[str, Path]) -> Config:
 
     Raises:
         FileNotFoundError: If config file doesn't exist
-        ValueError: If config validation fails
+        pydantic.ValidationError: If config validation fails
         tomli.TOMLDecodeError: If TOML parsing fails
     """
     path = Path(config_path)
@@ -170,7 +276,16 @@ def load_config(config_path: Union[str, Path]) -> Config:
     if config_dict is None:
         raise ValueError(f"Config file is empty: {config_path}")
 
-    return Config(config_dict)
+    # Create Pydantic model (validation happens automatically)
+    config = Config(**config_dict)
+
+    logger.info("Configuration validated successfully")
+    logger.info(f"  Data directory: {config.data.data_dir}")
+    logger.info(f"  Clients: {config.federated.num_clients}")
+    logger.info(f"  Rounds: {config.federated.num_rounds}")
+    logger.info(f"  DP enabled: {config.privacy.enable_dp}")
+
+    return config
 
 
 def merge_configs(base: Dict, override: Dict) -> Dict:

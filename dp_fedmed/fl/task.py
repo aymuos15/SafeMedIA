@@ -10,9 +10,10 @@ NOTE: We use manual training loops instead of MONAI engines because:
 
 Checkpointing is added directly to these functions for both best and last models.
 
-NOTE: DiceLoss is NOT used during training because it causes SIGFPE (floating point
-exceptions) with Opacus due to division operations in per-sample gradient computation.
-We use CrossEntropyLoss only for training, and DiceMetric only for evaluation.
+Loss functions are now configurable via the [loss] config section. Options:
+- cross_entropy: Standard CrossEntropyLoss (default, most stable with DP)
+- soft_dice: SoftDiceLoss using softmax probabilities (DP-compatible)
+- dice_ce: Combined Dice + CrossEntropy (recommended for segmentation)
 """
 
 from pathlib import Path
@@ -23,6 +24,8 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 from monai.metrics.meandice import DiceMetric
 
+from dp_fedmed.losses.dice import get_loss_function
+
 
 def train_one_epoch(
     model: nn.Module,
@@ -30,6 +33,7 @@ def train_one_epoch(
     optimizer,
     device: torch.device,
     criterion: Optional[nn.Module] = None,
+    loss_config: Optional[Dict] = None,
     checkpoint_dir: Optional[Path] = None,
 ) -> float:
     """Train model for one epoch.
@@ -39,7 +43,8 @@ def train_one_epoch(
         train_loader: Training data loader
         optimizer: Optimizer
         device: Device to train on
-        criterion: Loss function (default: CrossEntropy only for DP stability)
+        criterion: Loss function (overrides loss_config if provided)
+        loss_config: Loss configuration dict (used if criterion is None)
         checkpoint_dir: Optional directory for saving checkpoints
 
     Returns:
@@ -48,9 +53,11 @@ def train_one_epoch(
     model.train()
 
     if criterion is None:
-        # Use only CrossEntropyLoss for DP training
-        # DiceLoss causes SIGFPE with Opacus due to division operations in per-sample gradients
-        criterion = nn.CrossEntropyLoss()
+        if loss_config:
+            criterion = get_loss_function(loss_config)
+        else:
+            # Default to CrossEntropyLoss for backward compatibility
+            criterion = nn.CrossEntropyLoss()
 
     total_loss = 0.0
     num_batches = 0

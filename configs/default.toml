@@ -43,9 +43,17 @@ target_epsilon = 8.0  # Higher epsilon for better utility
 target_delta = 1.0e-5
 client_dataset_size = 270  # Samples per client for privacy budget calculation
 
+[loss]
+type = "dice_ce"  # Options: "cross_entropy", "soft_dice", "dice_ce"
+dice_smooth = 1.0
+dice_include_background = false
+dice_weight = 0.5  # Weight for Dice loss in dice_ce
+ce_weight = 0.5    # Weight for CrossEntropy in dice_ce
+
 [checkpointing]
 enabled = true
 checkpoint_dir = "checkpoints"  # Relative to run_dir
+resume_from = ""  # Path to checkpoint for resumption (empty = start fresh)
 
 [logging]
 save_model = true
