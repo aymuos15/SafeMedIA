@@ -35,6 +35,8 @@ def weighted_average(metrics: List[Tuple[int, Metrics]]) -> Metrics:
                 weighted_sum = sum(n * v for n, v in numeric_values)
                 aggregated[key] = weighted_sum / total_samples
             elif numeric_values:
-                logger.warning(f"Cannot aggregate metric '{key}': total_samples is zero")
+                logger.warning(
+                    f"Cannot aggregate metric '{key}': total_samples is zero"
+                )
 
     return aggregated

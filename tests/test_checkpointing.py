@@ -1,11 +1,8 @@
 """Tests for checkpoint saving and loading."""
 
-import pytest
 import torch
-from pathlib import Path
 
 from dp_fedmed.fl.task import train_one_epoch, evaluate
-from dp_fedmed.models.unet2d import create_unet2d, set_parameters
 
 
 class TestClientCheckpointing:
@@ -76,7 +73,7 @@ class TestClientCheckpointing:
         checkpoint_path = tmp_checkpoint_dir / "last_model.pt"
         assert checkpoint_path.exists()
 
-        loaded = torch.load(checkpoint_path)
+        loaded = torch.load(checkpoint_path, weights_only=True)
         assert "model" in loaded
 
     def test_checkpoint_restores_model(
@@ -89,7 +86,7 @@ class TestClientCheckpointing:
         dummy_model.eval()
         with torch.no_grad():
             sample_input = torch.rand(1, 1, 64, 64).to(device)
-            initial_output = dummy_model(sample_input).clone()
+            _ = dummy_model(sample_input)
 
         # Train to change weights
         optimizer = torch.optim.SGD(dummy_model.parameters(), lr=0.1)
@@ -115,7 +112,7 @@ class TestClientCheckpointing:
             trained_output = dummy_model(sample_input).clone()
 
         # Load checkpoint
-        checkpoint = torch.load(tmp_checkpoint_dir / "last_model.pt")
+        checkpoint = torch.load(tmp_checkpoint_dir / "last_model.pt", weights_only=True)
         dummy_model.load_state_dict(checkpoint["model"])
 
         # Verify loaded model gives same output as saved
@@ -148,7 +145,7 @@ class TestServerCheckpointing:
         assert last_path.exists()
 
         # Verify loadable
-        loaded = torch.load(last_path)
+        loaded = torch.load(last_path, weights_only=False)
         assert "parameters" in loaded
         assert len(loaded["parameters"]) == 1
 
@@ -162,7 +159,7 @@ class TestServerCheckpointing:
         best_path = tmp_checkpoint_dir / "best_model.pt"
         torch.save({"parameters": params, "dice": dice_score}, best_path)
 
-        loaded = torch.load(best_path)
+        loaded = torch.load(best_path, weights_only=False)
         assert "parameters" in loaded
         assert "dice" in loaded
         assert loaded["dice"] == dice_score

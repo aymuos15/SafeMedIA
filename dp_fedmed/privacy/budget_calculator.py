@@ -128,7 +128,7 @@ def compute_noise_multiplier(
             )
             break
 
-    if best_noise is None:
+    if best_noise is None or best_epsilon is None:
         # Budget is infeasible - provide detailed error
         logger.error("=" * 60)
         logger.error("❌ PRIVACY BUDGET INFEASIBLE")
@@ -139,7 +139,7 @@ def compute_noise_multiplier(
         for _ in range(int(steps_per_round)):
             accountant.step(noise_multiplier=10.0, sample_rate=sample_rate)
         epsilon_per_round_max = accountant.get_epsilon(delta=target_delta)
-        achievable_epsilon = epsilon_per_round_max * num_rounds
+        achievable_epsilon = float(epsilon_per_round_max * num_rounds)
 
         error_msg = (
             f"Cannot satisfy target ε={target_epsilon:.2f} with current configuration.\n\n"
@@ -159,7 +159,7 @@ def compute_noise_multiplier(
 
     logger.info("=" * 60)
 
-    return best_noise, best_epsilon
+    return float(best_noise), float(best_epsilon)
 
 
 def validate_privacy_config(
@@ -189,8 +189,6 @@ def validate_privacy_config(
     # Note: Actual dataset size per client will be determined at runtime
     # This is a conservative estimate for validation
     if client_dataset_size is None:
-        # Conservative estimate: assume data is split evenly
-        total_clients = int(config.get("federated.num_clients", 2))
         # We don't know total dataset size, so use a reasonable default
         # This should be updated if you have dataset info in config
         client_dataset_size = 270  # From your current setup

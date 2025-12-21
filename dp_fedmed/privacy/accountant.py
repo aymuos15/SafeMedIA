@@ -11,6 +11,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class PrivacyMetrics:
     """Privacy metrics for a single round."""
+
     round_num: int
     epsilon: float
     delta: float
@@ -26,6 +27,7 @@ class PrivacyAccountant:
     Uses simple composition for epsilon accumulation.
     For tighter bounds, consider using Opacus's RDP accountant.
     """
+
     target_epsilon: float
     target_delta: float = 1e-5
     rounds: List[PrivacyMetrics] = field(default_factory=list)
@@ -178,8 +180,7 @@ class ClientPrivacyTracker:
     def get_active_clients(self) -> List[int]:
         """Get list of clients that haven't exceeded their budget."""
         return [
-            i for i in range(self.num_clients)
-            if not self.is_client_budget_exceeded(i)
+            i for i in range(self.num_clients) if not self.is_client_budget_exceeded(i)
         ]
 
     def get_summary(self) -> Dict:

@@ -23,7 +23,9 @@ class TestTrainOneEpoch:
         assert isinstance(loss, float)
         assert loss >= 0
 
-    def test_with_dict_dataloader(self, dummy_model, dummy_dict_dataloader, optimizer, device):
+    def test_with_dict_dataloader(
+        self, dummy_model, dummy_dict_dataloader, optimizer, device
+    ):
         """Verify training works with dict-format data loader."""
         dummy_model.to(device)
 
@@ -36,7 +38,9 @@ class TestTrainOneEpoch:
 
         assert isinstance(loss, float)
 
-    def test_with_checkpoint_dir(self, dummy_model, dummy_dataloader, optimizer, device, tmp_checkpoint_dir):
+    def test_with_checkpoint_dir(
+        self, dummy_model, dummy_dataloader, optimizer, device, tmp_checkpoint_dir
+    ):
         """Verify training creates checkpoint when dir provided."""
         dummy_model.to(device)
 
@@ -71,7 +75,9 @@ class TestTrainOneEpoch:
 
         # Check at least one weight changed
         final_sum = first_param.sum().item()
-        assert abs(initial_sum - final_sum) > 1e-6, "Weights should change during training"
+        assert abs(initial_sum - final_sum) > 1e-6, (
+            "Weights should change during training"
+        )
 
 
 class TestEvaluate:
@@ -106,7 +112,9 @@ class TestEvaluate:
         assert "loss" in metrics
         assert "dice" in metrics
 
-    def test_with_checkpoint_saves_best(self, dummy_model, dummy_dataloader, device, tmp_checkpoint_dir):
+    def test_with_checkpoint_saves_best(
+        self, dummy_model, dummy_dataloader, device, tmp_checkpoint_dir
+    ):
         """Verify evaluate saves best model when dice improves."""
         dummy_model.to(device)
 
@@ -144,8 +152,12 @@ class TestOpacusCompatibility:
     Run with: pytest tests/test_task.py::TestOpacusCompatibility --forked
     """
 
-    @pytest.mark.skip(reason="Opacus + pytest fixture interaction causes SIGFPE. Run separately: python3 -c 'from tests.test_task import test_opacus_manually; test_opacus_manually()'")
-    def test_opacus_training_and_checkpointing(self, dummy_model, dummy_dataloader, device, tmp_checkpoint_dir):
+    @pytest.mark.skip(
+        reason="Opacus + pytest fixture interaction causes SIGFPE. Run separately: python3 -c 'from tests.test_task import test_opacus_manually; test_opacus_manually()'"
+    )
+    def test_opacus_training_and_checkpointing(
+        self, dummy_model, dummy_dataloader, device, tmp_checkpoint_dir
+    ):
         """Verify training and checkpointing work with Opacus-wrapped components."""
         pytest.importorskip("opacus")
         from opacus import PrivacyEngine
@@ -177,7 +189,9 @@ class TestOpacusCompatibility:
         assert (tmp_checkpoint_dir / "last_model.pt").exists()
 
         # Verify checkpoint is loadable
-        checkpoint = torch.load(tmp_checkpoint_dir / "last_model.pt", weights_only=False)
+        checkpoint = torch.load(
+            tmp_checkpoint_dir / "last_model.pt", weights_only=False
+        )
         assert "model" in checkpoint
 
 
@@ -189,7 +203,9 @@ def test_opacus_manually():
     from torch.utils.data import DataLoader, TensorDataset
     from dp_fedmed.models.unet2d import create_unet2d
 
-    model = create_unet2d(in_channels=1, out_channels=2, channels=(16, 32), strides=(2,), num_res_units=1)
+    model = create_unet2d(
+        in_channels=1, out_channels=2, channels=(16, 32), strides=(2,), num_res_units=1
+    )
     images = torch.rand(8, 1, 64, 64)
     labels = torch.randint(0, 2, (8, 64, 64))
     loader = DataLoader(TensorDataset(images, labels), batch_size=4)
@@ -197,12 +213,17 @@ def test_opacus_manually():
 
     privacy_engine = PrivacyEngine()
     model, optimizer, dp_loader = privacy_engine.make_private(
-        module=model, optimizer=optimizer, data_loader=loader,
-        noise_multiplier=1.0, max_grad_norm=1.0,
+        module=model,
+        optimizer=optimizer,
+        data_loader=loader,
+        noise_multiplier=1.0,
+        max_grad_norm=1.0,
     )
 
     with tempfile.TemporaryDirectory() as tmp:
-        loss = train_one_epoch(model, dp_loader, optimizer, torch.device("cpu"), checkpoint_dir=Path(tmp))
+        loss = train_one_epoch(
+            model, dp_loader, optimizer, torch.device("cpu"), checkpoint_dir=Path(tmp)
+        )
         assert isinstance(loss, float)
         assert (Path(tmp) / "last_model.pt").exists()
         print(f"SUCCESS! Loss: {loss}")

@@ -5,11 +5,11 @@ Opacus requires GroupNorm instead of BatchNorm because:
 - GroupNorm computes statistics within each sample, making it DP-compatible
 """
 
-from typing import Sequence, Tuple
+from typing import Sequence
 
 import torch
 import torch.nn as nn
-from monai.networks.nets import UNet
+from monai.networks.nets.unet import UNet
 
 
 def create_unet2d(
@@ -73,7 +73,7 @@ class UNet2D(nn.Module):
             num_res_units=num_res_units,
             dropout=dropout,
         )
-        self.out_channels = out_channels
+        self.out_channels: int = out_channels
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.model(x)

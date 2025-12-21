@@ -34,6 +34,8 @@ dev = [
     "pytest",
     "black",
     "ruff",
+    "pre-commit",
+    "ty",
 ]
 
 [tool.hatch.build.targets.wheel]

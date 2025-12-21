@@ -22,7 +22,7 @@ from .aggregation import weighted_average
 def server_fn(context: fl.common.Context) -> ServerAppComponents:
     """Create server components."""
     cfg = context.run_config
-    config_file = cfg.get("config-file", "configs/default.toml")
+    config_file = str(cfg.get("config-file", "configs/default.toml"))
 
     try:
         config = load_config(config_file)
@@ -34,7 +34,7 @@ def server_fn(context: fl.common.Context) -> ServerAppComponents:
     run_name = Path(config_file).stem
 
     # Setup logging (creates results/<run_name>/server/ directory)
-    log_level = config.get("logging.level", "INFO")
+    log_level = str(config.get("logging.level", "INFO"))
     run_dir = setup_logging(run_name=run_name, level=log_level, role="server")
 
     logger.info("=" * 60)

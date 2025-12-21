@@ -6,10 +6,10 @@ DPFlowerClient instances for federated learning.
 
 from pathlib import Path
 
-import torch
+import torch.utils.data
 import flwr as fl
 from flwr.common import Context
-from monai.data import Dataset
+from monai.data.dataset import Dataset
 from loguru import logger
 
 from ...config import load_config
@@ -32,7 +32,7 @@ def client_fn(context: Context) -> fl.client.Client:
     """
     # Load YAML configuration
     cfg = context.run_config
-    config_file = cfg.get("config-file", "configs/default.yaml")
+    config_file = str(cfg.get("config-file", "configs/default.toml"))
 
     try:
         config = load_config(config_file)
@@ -41,22 +41,22 @@ def client_fn(context: Context) -> fl.client.Client:
         raise
 
     # Get partition info
-    partition_id = int(context.node_config.get("partition-id", 0))
+    partition_id = int(context.node_config.get("partition-id", 0))  # type: ignore
     num_partitions = int(
         context.node_config.get(
             "num-partitions", config.get("federated.num_clients", 2)
-        )
+        )  # type: ignore
     )
 
     # Setup logging with hierarchical structure
-    log_level = config.get("logging.level", "INFO")
+    log_level = str(config.get("logging.level", "INFO"))
     run_name = Path(config_file).stem  # Extract "default" from "configs/default.toml"
     role = f"client_{partition_id}"
     run_dir = setup_logging(run_name=run_name, level=log_level, role=role)
 
-    logger.info(f"=" * 60)
+    logger.info("=" * 60)
     logger.info(f"Initializing Client {partition_id}/{num_partitions}")
-    logger.info(f"=" * 60)
+    logger.info("=" * 60)
 
     # Get data settings from config
     data_dir = config.get("data.data_dir")

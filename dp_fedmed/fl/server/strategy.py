@@ -102,7 +102,9 @@ class DPFedAvg(FedAvg):
 
         # Calculate sample size based on fraction_evaluate
         num_available = client_manager.num_available()
-        sample_size = max(int(num_available * self.fraction_evaluate), self.min_evaluate_clients)
+        sample_size = max(
+            int(num_available * self.fraction_evaluate), self.min_evaluate_clients
+        )
         sample_size = min(sample_size, num_available)
 
         clients = client_manager.sample(
@@ -110,7 +112,9 @@ class DPFedAvg(FedAvg):
         )
 
         # Return clients and config
-        return [(client, fl.common.EvaluateIns(parameters, config)) for client in clients]
+        return [
+            (client, fl.common.EvaluateIns(parameters, config)) for client in clients
+        ]
 
     def aggregate_fit(
         self,
@@ -170,7 +174,9 @@ class DPFedAvg(FedAvg):
         else:
             remaining = self.privacy_accountant.get_remaining_budget()
             remaining_pct = (remaining / self.privacy_accountant.target_epsilon) * 100
-            logger.info(f"Privacy budget OK. Remaining: {remaining_pct:.1f}% ({remaining:.4f} ε)")
+            logger.info(
+                f"Privacy budget OK. Remaining: {remaining_pct:.1f}% ({remaining:.4f} ε)"
+            )
 
         # Aggregate parameters using parent class
         aggregated_parameters, aggregated_metrics = super().aggregate_fit(
@@ -249,7 +255,9 @@ class DPFedAvg(FedAvg):
                     client_found = True
                     break
             if not client_found:
-                logger.warning(f"Round {server_round} not found in client_metrics for client {client_id}")
+                logger.warning(
+                    f"Round {server_round} not found in client_metrics for client {client_id}"
+                )
 
         if dice_values:
             weighted_dice = sum(d * w for d, w in zip(dice_values, weights)) / sum(
@@ -268,7 +276,9 @@ class DPFedAvg(FedAvg):
                     server_found = True
                     break
             if not server_found:
-                logger.warning(f"Round {server_round} not found in server_rounds for aggregation update")
+                logger.warning(
+                    f"Round {server_round} not found in server_rounds for aggregation update"
+                )
 
             logger.info(
                 f"Round {server_round} eval: "
@@ -341,7 +351,7 @@ class DPFedAvg(FedAvg):
         metrics_path = self.run_dir / "metrics.json"
         with open(metrics_path, "w") as f:
             json.dump(metrics_data, f, indent=2)
-        logger.info(f"✓ Saved metrics.json")
+        logger.info("✓ Saved metrics.json")
 
         # Save history.json (per-round data)
         history_data = {
@@ -354,7 +364,7 @@ class DPFedAvg(FedAvg):
         history_path = self.run_dir / "history.json"
         with open(history_path, "w") as f:
             json.dump(history_data, f, indent=2)
-        logger.info(f"✓ Saved history.json")
+        logger.info("✓ Saved history.json")
 
         logger.info(f"✓ Results saved to: {self.run_dir}")
         logger.info(f"✓ Final Dice: {final_dice:.4f}, Final Loss: {final_loss:.4f}")
