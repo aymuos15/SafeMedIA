@@ -35,7 +35,7 @@ def load_checkpoint(
     """
     logger.info(f"Loading checkpoint from: {checkpoint_path}")
 
-    checkpoint = torch.load(checkpoint_path, weights_only=False)
+    checkpoint = torch.load(checkpoint_path, weights_only=False)  # nosec B614
 
     # Get round number (resume from next round)
     checkpoint_round = checkpoint.get("round", 0)

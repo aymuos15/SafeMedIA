@@ -122,3 +122,6 @@ Thumbs.db
 # Temporary files
 *.tmp
 *.temp
+
+# Idea
+idea.md

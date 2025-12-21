@@ -37,6 +37,8 @@ dev = [
     "ruff",
     "pre-commit",
     "ty",
+    "basedpyright",
+    "bandit[toml]",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -61,3 +63,14 @@ options.backend.client-resources.num-cpus = 1
 options.backend.client-resources.num-gpus = 0.3
 options.backend.init-args.include_dashboard = false
 
+[tool.bandit]
+exclude_dirs = [".venv", "tests", "__pycache__"]
+skips = ["B101"]  # Skip assert warnings (common in tests)
+
+[tool.basedpyright]
+pythonVersion = "3.10"
+typeCheckingMode = "standard"
+reportMissingImports = false
+reportMissingTypeStubs = false
+reportUnsupportedDunderAll = false
+reportOptionalCall = false
