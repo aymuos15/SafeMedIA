@@ -1,0 +1,48 @@
+# Default Configuration for DP-FedMed
+# Low privacy setting optimized for better utility
+
+[data]
+# REQUIRED: You must specify data_dir
+data_dir = "/home/localssk23/CAI4Soumya/SegData/nnUNet_raw/Dataset001_Cellpose"
+image_size = 256
+batch_size = 8  # Increased from 2 for better numerical stability with DP
+num_workers = 2
+
+[model]
+in_channels = 1
+out_channels = 2
+channels = [16, 32, 64, 128]  # Channel dimensions for each layer
+strides = [2, 2, 2]  # Stride for each downsampling layer
+num_res_units = 2
+
+[federated]
+num_clients = 2
+num_rounds = 5  # Quick iterations
+fraction_fit = 1.0
+fraction_evaluate = 1.0
+min_fit_clients = 2
+min_evaluate_clients = 2
+min_available_clients = 2
+
+[client_resources]
+num_cpus = 1
+num_gpus = 0.3  # Fraction of GPU per client
+
+[training]
+local_epochs = 5  # More local training per round
+learning_rate = 0.001
+optimizer = "sgd"
+momentum = 0.9
+
+[privacy]
+# Low privacy: epsilon = 8.0
+enable_dp = true
+noise_multiplier = 1.0
+max_grad_norm = 1.0
+target_epsilon = 8.0  # Higher epsilon for better utility
+target_delta = 1.0e-5
+
+[logging]
+save_model = true
+save_metrics = true
+level = "INFO"

@@ -1,0 +1,60 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "dp-fedmed"
+version = "0.1.0"
+description = "Differential Privacy + Federated Learning for Medical Imaging (Flower + Opacus + MONAI)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+authors = [
+    { name = "Your Name", email = "your.email@example.com" },
+]
+
+dependencies = [
+    "flwr[simulation]>=1.11.0",
+    "opacus>=1.5.0",
+    "monai>=1.3.0",
+    "torch>=2.0.0",
+    "torchvision",
+    "numpy",
+    "pillow",
+    "tomli",
+    "loguru>=0.7.0",
+]
+
+[project.optional-dependencies]
+benchmark = [
+    "matplotlib",
+    "pandas",
+]
+dev = [
+    "pytest",
+    "black",
+    "ruff",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["dp_fedmed"]
+
+[tool.flwr.app]
+publisher = "dp-fedmed"
+
+[tool.flwr.app.components]
+serverapp = "dp_fedmed.server_app:app"
+clientapp = "dp_fedmed.client_app:app"
+
+[tool.flwr.app.config]
+config-file = "configs/default.toml"
+
+[tool.flwr.federations]
+default = "local-simulation"
+
+[tool.flwr.federations.local-simulation]
+options.num-supernodes = 2
+options.backend.client-resources.num-cpus = 1
+options.backend.client-resources.num-gpus = 0.3
+options.backend.init-args.include_dashboard = false
+
