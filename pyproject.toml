@@ -43,8 +43,8 @@ packages = ["dp_fedmed"]
 publisher = "dp-fedmed"
 
 [tool.flwr.app.components]
-serverapp = "dp_fedmed.server_app:app"
-clientapp = "dp_fedmed.client_app:app"
+serverapp = "dp_fedmed.fl.server.app:app"
+clientapp = "dp_fedmed.fl.client.app:app"
 
 [tool.flwr.app.config]
 config-file = "configs/default.toml"

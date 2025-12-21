@@ -1,7 +1,7 @@
-"""Flower ClientApp with Opacus differential privacy for federated learning.
+"""Flower client with differential privacy using Opacus.
 
-This module defines the Flower client that performs local training with
-differential privacy using Opacus. Configuration is loaded from YAML files.
+This module defines the DPFlowerClient class that performs local training
+with differential privacy using Opacus.
 """
 
 import json
@@ -10,17 +10,15 @@ from pathlib import Path
 from typing import Dict, Tuple
 
 import torch
-import flwr as fl
-from flwr.client import ClientApp, NumPyClient
-from flwr.common import Context, NDArrays, Scalar
+import torch.utils.data
+from flwr.client import NumPyClient
+from flwr.common import NDArrays, Scalar
 from opacus import PrivacyEngine
 from loguru import logger
 
-from .models.unet2d import create_unet2d, get_parameters, set_parameters
-from .data.cellpose import CellposeDataset
-from .task import train_one_epoch, evaluate
-from .config import load_config
-from .logging_config import setup_logging
+
+from ...models.unet2d import create_unet2d, get_parameters, set_parameters
+from ..task import train_one_epoch, evaluate
 
 
 class DPFlowerClient(NumPyClient):
@@ -59,6 +57,7 @@ class DPFlowerClient(NumPyClient):
 
         # Track metrics across rounds
         self.round_history = []
+        self._load_history()
         self.start_time = datetime.now().isoformat()
 
         # Create model from config
@@ -121,17 +120,23 @@ class DPFlowerClient(NumPyClient):
         # Validate privacy parameters
         if enable_dp:
             if max_grad_norm <= 0:
-                logger.warning(f"Invalid max_grad_norm {max_grad_norm}, using default 1.0")
+                logger.warning(
+                    f"Invalid max_grad_norm {max_grad_norm}, using default 1.0"
+                )
                 max_grad_norm = 1.0
             if noise_multiplier <= 0:
-                logger.warning(f"Invalid noise_multiplier {noise_multiplier}, using default 1.0")
+                logger.warning(
+                    f"Invalid noise_multiplier {noise_multiplier}, using default 1.0"
+                )
                 noise_multiplier = 1.0
             if target_delta <= 0 or target_delta >= 1:
-                logger.warning(f"Invalid target_delta {target_delta}, using default 1e-5")
+                logger.warning(
+                    f"Invalid target_delta {target_delta}, using default 1e-5"
+                )
                 target_delta = 1e-5
 
         # Set up optimizer
-        self.optimizer = torch.optim.SGD(
+        self.optimizer = torch.optim.SGD(  # type: ignore
             self.model.parameters(),
             lr=lr,
             momentum=momentum,
@@ -160,6 +165,11 @@ class DPFlowerClient(NumPyClient):
             train_loader = self.train_loader
             logger.info("DP disabled - training without privacy")
 
+        # Set up checkpoint directory
+        checkpoint_dir = None
+        if self.run_dir:
+            checkpoint_dir = self.run_dir / "checkpoints"
+
         # Training loop
         total_loss = 0.0
         for epoch in range(local_epochs):
@@ -168,6 +178,7 @@ class DPFlowerClient(NumPyClient):
                 train_loader,
                 self.optimizer,
                 self.device,
+                checkpoint_dir=checkpoint_dir,
             )
             total_loss += epoch_loss
             logger.debug(
@@ -186,19 +197,33 @@ class DPFlowerClient(NumPyClient):
             )
 
         # Store round metrics
+        try:
+            num_train_samples = len(self.train_loader.dataset)  # type: ignore
+        except (TypeError, AttributeError):
+            num_train_samples = 0
+
         round_metrics = {
             "round": int(config.get("server_round", 0)),
             "train_loss": float(total_loss / local_epochs),
             "epsilon": float(epsilon),
             "delta": float(target_delta if enable_dp else 0.0),
-            "num_samples": len(self.train_loader.dataset),
+            "num_samples": num_train_samples,
         }
+
         self.round_history.append(round_metrics)
 
+        # Save metrics after fit to ensure persistence
+        self._save_client_metrics()
+
         # Return updated parameters and metrics
+        try:
+            num_fit_samples = len(self.train_loader.dataset)  # type: ignore
+        except (TypeError, AttributeError):
+            num_fit_samples = 0
+
         return (
             get_parameters(self.model),
-            len(self.train_loader.dataset),
+            num_fit_samples,
             {
                 "loss": float(total_loss / local_epochs),
                 "epsilon": float(epsilon),
@@ -222,7 +247,14 @@ class DPFlowerClient(NumPyClient):
         """
         self.set_parameters(parameters)
 
-        metrics = evaluate(self.model, self.test_loader, self.device)
+        # Set up checkpoint directory
+        checkpoint_dir = None
+        if self.run_dir:
+            checkpoint_dir = self.run_dir / "checkpoints"
+
+        metrics = evaluate(
+            self.model, self.test_loader, self.device, checkpoint_dir=checkpoint_dir
+        )
 
         logger.debug(
             f"Evaluation: Dice = {metrics['dice']:.4f}, Loss = {metrics['loss']:.4f}"
@@ -230,6 +262,10 @@ class DPFlowerClient(NumPyClient):
 
         # Update last round with eval metrics
         server_round = int(config.get("server_round", 0))
+
+        # Ensure latest history is loaded before updating
+        self._load_history()
+
         found = False
         for entry in reversed(self.round_history):
             if entry["round"] == server_round:
@@ -237,19 +273,57 @@ class DPFlowerClient(NumPyClient):
                 entry["eval_loss"] = float(metrics["loss"])
                 found = True
                 break
+
         if not found:
-            logger.warning(f"Round {server_round} not found in round_history for evaluation update")
+            # If round not found in history, create a placeholder entry
+            # This happens in Flower simulation because actors are stateless
+            placeholder = {
+                "round": server_round,
+                "train_loss": 0.0,
+                "epsilon": 0.0,
+                "delta": 0.0,
+                "num_samples": 0,
+                "eval_dice": float(metrics["dice"]),
+                "eval_loss": float(metrics["loss"]),
+            }
+            self.round_history.append(placeholder)
+            # logger.debug(f"Created placeholder for Round {server_round} in evaluate") # Silenced to avoid log noise
 
         # Save client metrics after evaluation
         self._save_client_metrics()
 
+        try:
+            num_test_samples = len(self.test_loader.dataset)  # type: ignore
+        except (TypeError, AttributeError):
+            num_test_samples = 0
+
         return (
             metrics["loss"],
-            len(self.test_loader.dataset),
+            num_test_samples,
             {
                 "dice": metrics["dice"],
             },
         )
+
+        return (
+            metrics["loss"],
+            num_test_samples,
+            {
+                "dice": metrics["dice"],
+            },
+        )
+
+    def _load_history(self) -> None:
+        """Load client history from disk."""
+        if self.run_dir:
+            history_path = self.run_dir / "history.json"
+            if history_path.exists():
+                try:
+                    with open(history_path, "r") as f:
+                        data = json.load(f)
+                        self.round_history = data.get("rounds", [])
+                except Exception:
+                    logger.debug("No existing history found to load")
 
     def _save_client_metrics(self) -> None:
         """Save client-specific metrics and history."""
@@ -269,6 +343,11 @@ class DPFlowerClient(NumPyClient):
             final_dice = last_round.get("eval_dice", 0.0)
             total_epsilon = sum(r.get("epsilon", 0.0) for r in self.round_history)
 
+        try:
+            num_total_samples = len(self.train_loader.dataset)  # type: ignore
+        except (TypeError, AttributeError):
+            num_total_samples = 0
+
         # Save metrics.json
         metrics_data = {
             "client_id": self.client_id,
@@ -277,7 +356,7 @@ class DPFlowerClient(NumPyClient):
             "num_rounds": len(self.round_history),
             "final_train_loss": final_train_loss,
             "final_dice": final_dice,
-            "training_samples": len(self.train_loader.dataset),
+            "training_samples": num_total_samples,
             "privacy": {
                 "total_epsilon": total_epsilon,
                 "delta": self.privacy_config.get("target_delta", 1e-5),
@@ -296,135 +375,3 @@ class DPFlowerClient(NumPyClient):
             json.dump(history_data, f, indent=2)
 
         logger.debug(f"✓ Client {self.client_id} metrics saved to {self.run_dir}")
-
-
-def client_fn(context: Context) -> fl.client.Client:
-    """Create a Flower client instance.
-
-    This function is called by Flower to create clients. It loads configuration
-    from the YAML file specified in run_config.
-
-    Args:
-        context: Flower context containing configuration
-
-    Returns:
-        Configured Flower client
-    """
-    # Load YAML configuration
-    cfg = context.run_config
-    config_file = cfg.get("config-file", "configs/default.yaml")
-
-    try:
-        config = load_config(config_file)
-    except Exception as e:
-        logger.error(f"Failed to load config from {config_file}: {e}")
-        raise
-
-    # Get partition info
-    partition_id = int(context.node_config.get("partition-id", 0))
-    num_partitions = int(
-        context.node_config.get(
-            "num-partitions", config.get("federated.num_clients", 2)
-        )
-    )
-
-    # Setup logging with hierarchical structure
-    log_level = config.get("logging.level", "INFO")
-    run_name = Path(config_file).stem  # Extract "default" from "configs/default.toml"
-    role = f"client_{partition_id}"
-    run_dir = setup_logging(run_name=run_name, level=log_level, role=role)
-
-    logger.info(f"=" * 60)
-    logger.info(f"Initializing Client {partition_id}/{num_partitions}")
-    logger.info(f"=" * 60)
-
-    # Get data settings from config
-    data_dir = config.get("data.data_dir")
-    batch_size = int(config.get("data.batch_size", 8))
-    image_size = int(config.get("data.image_size", 256))
-    num_workers = int(config.get("data.num_workers", 2))
-
-    logger.info(f"Data directory: {data_dir}")
-    logger.info(f"Batch size: {batch_size}, Image size: {image_size}x{image_size}")
-
-    # Load full datasets
-    train_dataset = CellposeDataset(
-        data_dir=data_dir,
-        split="train",
-        image_size=(image_size, image_size),
-    )
-
-    test_dataset = CellposeDataset(
-        data_dir=data_dir,
-        split="test",
-        image_size=(image_size, image_size),
-    )
-
-    # Partition training data for this client
-    total_samples = len(train_dataset)
-    samples_per_client = total_samples // num_partitions
-    start_idx = partition_id * samples_per_client
-    end_idx = (
-        start_idx + samples_per_client
-        if partition_id < num_partitions - 1
-        else total_samples
-    )
-
-    # Create subset for this client
-    train_indices = list(range(start_idx, end_idx))
-    client_train_dataset = CellposeDataset(
-        data_dir=data_dir,
-        split="train",
-        image_size=(image_size, image_size),
-        indices=train_indices,
-    )
-
-    logger.info(f"Client {partition_id} data: {len(train_indices)} training samples")
-
-    # Determine device
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    logger.info(f"Using device: {device}")
-
-    # Create data loaders (DPDataLoader handles batching for DP)
-    train_loader = torch.utils.data.DataLoader(
-        client_train_dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=num_workers,
-    )
-
-    test_loader = torch.utils.data.DataLoader(
-        test_dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=num_workers,
-    )
-
-    # Get config sections
-    model_config = config.get_section("model")
-    training_config = config.get_section("training")
-    privacy_config = config.get_section("privacy")
-
-    # Log privacy settings
-    if privacy_config.get("enable_dp", True):
-        logger.info(
-            f"Privacy: ENABLED (ε target = {privacy_config.get('target_epsilon', 4.0)})"
-        )
-    else:
-        logger.warning("Privacy: DISABLED")
-
-    # Create and return client
-    return DPFlowerClient(
-        train_loader=train_loader,
-        test_loader=test_loader,
-        model_config=model_config,
-        training_config=training_config,
-        privacy_config=privacy_config,
-        device=device,
-        client_id=partition_id,
-        run_dir=run_dir,
-    ).to_client()
-
-
-# Create Flower ClientApp
-app = ClientApp(client_fn=client_fn)

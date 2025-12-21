@@ -16,8 +16,8 @@ echo "1. Checking modified files..."
 echo "   - dp_fedmed/privacy/budget_calculator.py"
 [ -f "dp_fedmed/privacy/budget_calculator.py" ] && echo "     ✓ Found" || echo "     ✗ Missing"
 
-echo "   - dp_fedmed/logging_config.py"
-[ -f "dp_fedmed/logging_config.py" ] && echo "     ✓ Found" || echo "     ✗ Missing"
+echo "   - dp_fedmed/logging.py"
+[ -f "dp_fedmed/logging.py" ] && echo "     ✓ Found" || echo "     ✗ Missing"
 
 echo "   - dp_fedmed/server_app.py"
 [ -f "dp_fedmed/server_app.py" ] && echo "     ✓ Found" || echo "     ✗ Missing"

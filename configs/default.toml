@@ -43,6 +43,10 @@ target_epsilon = 8.0  # Higher epsilon for better utility
 target_delta = 1.0e-5
 client_dataset_size = 270  # Samples per client for privacy budget calculation
 
+[checkpointing]
+enabled = true
+checkpoint_dir = "checkpoints"  # Relative to run_dir
+
 [logging]
 save_model = true
 save_metrics = true
