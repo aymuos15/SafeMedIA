@@ -5,7 +5,7 @@ Opacus requires GroupNorm instead of BatchNorm because:
 - GroupNorm computes statistics within each sample, making it DP-compatible
 """
 
-from typing import Sequence, Tuple, Union
+from typing import Sequence, Tuple
 
 import torch
 import torch.nn as nn

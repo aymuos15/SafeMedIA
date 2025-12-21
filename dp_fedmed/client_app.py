@@ -121,13 +121,14 @@ class DPFlowerClient(NumPyClient):
         # Validate privacy parameters
         if enable_dp:
             if max_grad_norm <= 0:
-                logger.warning(f"Invalid max_grad_norm {max_grad_norm}, using 1.0")
+                logger.warning(f"Invalid max_grad_norm {max_grad_norm}, using default 1.0")
                 max_grad_norm = 1.0
-            if noise_multiplier < 0:
-                logger.warning(
-                    f"Invalid noise_multiplier {noise_multiplier}, using 1.0"
-                )
+            if noise_multiplier <= 0:
+                logger.warning(f"Invalid noise_multiplier {noise_multiplier}, using default 1.0")
                 noise_multiplier = 1.0
+            if target_delta <= 0 or target_delta >= 1:
+                logger.warning(f"Invalid target_delta {target_delta}, using default 1e-5")
+                target_delta = 1e-5
 
         # Set up optimizer
         self.optimizer = torch.optim.SGD(
@@ -136,7 +137,7 @@ class DPFlowerClient(NumPyClient):
             momentum=momentum,
         )
 
-        epsilon = float("inf")
+        epsilon = 0.0  # Will be updated if DP is enabled
 
         if enable_dp:
             # Set up privacy engine
@@ -229,11 +230,15 @@ class DPFlowerClient(NumPyClient):
 
         # Update last round with eval metrics
         server_round = int(config.get("server_round", 0))
+        found = False
         for entry in reversed(self.round_history):
             if entry["round"] == server_round:
                 entry["eval_dice"] = float(metrics["dice"])
                 entry["eval_loss"] = float(metrics["loss"])
+                found = True
                 break
+        if not found:
+            logger.warning(f"Round {server_round} not found in round_history for evaluation update")
 
         # Save client metrics after evaluation
         self._save_client_metrics()

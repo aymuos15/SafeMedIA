@@ -159,10 +159,6 @@ def compute_noise_multiplier(
 
     logger.info("=" * 60)
 
-    # Ensure we return valid values
-    if best_noise is None or best_epsilon is None:
-        raise ValueError("Failed to compute valid noise multiplier")
-
     return best_noise, best_epsilon
 
 

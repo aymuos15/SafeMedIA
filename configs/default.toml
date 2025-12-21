@@ -41,6 +41,7 @@ noise_multiplier = 1.0
 max_grad_norm = 1.0
 target_epsilon = 8.0  # Higher epsilon for better utility
 target_delta = 1.0e-5
+client_dataset_size = 270  # Samples per client for privacy budget calculation
 
 [logging]
 save_model = true

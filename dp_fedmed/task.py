@@ -13,7 +13,6 @@ from typing import Dict, Optional
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
-from monai.losses.dice import DiceLoss
 from monai.metrics.meandice import DiceMetric
 
 

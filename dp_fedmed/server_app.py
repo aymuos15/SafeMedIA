@@ -35,6 +35,7 @@ class DPFedAvg(FedAvg):
         save_metrics: bool = True,
         num_rounds: Optional[int] = None,
         noise_multiplier: float = 1.0,
+        max_grad_norm: float = 1.0,
         **kwargs,
     ):
         """Initialize DP-aware FedAvg.
@@ -47,6 +48,7 @@ class DPFedAvg(FedAvg):
             save_metrics: Whether to save metrics to file
             num_rounds: Total number of rounds
             noise_multiplier: Pre-computed noise multiplier to use for all rounds
+            max_grad_norm: Maximum gradient norm for DP clipping
             **kwargs: Additional arguments for FedAvg
         """
         super().__init__(**kwargs)
@@ -59,6 +61,7 @@ class DPFedAvg(FedAvg):
         self.save_metrics = save_metrics
         self.num_rounds = num_rounds
         self.noise_multiplier = noise_multiplier
+        self.max_grad_norm = max_grad_norm
 
         # Server-level round metrics
         self.server_rounds: List[Dict[str, Any]] = []
@@ -110,14 +113,14 @@ class DPFedAvg(FedAvg):
 
             # Extract client metrics
             eps = metrics.get("epsilon", 0.0)
-            if isinstance(eps, (int, float)) and eps != float("inf"):
+            if isinstance(eps, (int, float)) and eps > 0:
                 epsilons.append(float(eps))
 
             # Store per-client training metrics
             client_round_data = {
                 "round": server_round,
                 "train_loss": float(metrics.get("loss", 0.0)),
-                "epsilon": float(eps) if eps != float("inf") else 0.0,
+                "epsilon": float(eps),
                 "delta": float(metrics.get("delta", 1e-5)),
                 "num_samples": fit_res.num_examples,
             }
@@ -133,8 +136,8 @@ class DPFedAvg(FedAvg):
                 round_num=server_round,
                 epsilon=avg_epsilon,
                 delta=self.privacy_accountant.target_delta,
-                noise_multiplier=1.0,
-                max_grad_norm=1.0,
+                noise_multiplier=self.noise_multiplier,
+                max_grad_norm=self.max_grad_norm,
                 num_samples=total_samples,
             )
 
@@ -147,7 +150,8 @@ class DPFedAvg(FedAvg):
             )
         else:
             remaining = self.privacy_accountant.get_remaining_budget()
-            logger.info(f"Privacy budget OK. Remaining: {remaining:.2f}%")
+            remaining_pct = (remaining / self.privacy_accountant.target_epsilon) * 100
+            logger.info(f"Privacy budget OK. Remaining: {remaining_pct:.1f}% ({remaining:.4f} ε)")
 
         # Aggregate parameters using parent class
         aggregated_parameters, aggregated_metrics = super().aggregate_fit(
@@ -215,11 +219,15 @@ class DPFedAvg(FedAvg):
             weights.append(eval_res.num_examples)
 
             # Update client's last round entry with eval metrics
+            client_found = False
             for entry in reversed(self.client_metrics[client_id]):
                 if entry["round"] == server_round:
                     entry["dice"] = dice
                     entry["eval_loss"] = eval_loss
+                    client_found = True
                     break
+            if not client_found:
+                logger.warning(f"Round {server_round} not found in client_metrics for client {client_id}")
 
         if dice_values:
             weighted_dice = sum(d * w for d, w in zip(dice_values, weights)) / sum(
@@ -228,13 +236,17 @@ class DPFedAvg(FedAvg):
             metrics_aggregated["dice"] = float(weighted_dice)
 
             # Update server round metrics
+            server_found = False
             for entry in self.server_rounds:
                 if entry["round"] == server_round:
                     entry["aggregated_dice"] = float(weighted_dice)
                     entry["aggregated_loss"] = (
                         float(loss_aggregated) if loss_aggregated else 0.0
                     )
+                    server_found = True
                     break
+            if not server_found:
+                logger.warning(f"Round {server_round} not found in server_rounds for aggregation update")
 
             logger.info(
                 f"Round {server_round} eval: "
@@ -318,9 +330,11 @@ def weighted_average(metrics: List[Tuple[int, Metrics]]) -> Metrics:
                 if isinstance(v, (int, float)):
                     numeric_values.append((n, float(v)))
 
-            if numeric_values:
+            if numeric_values and total_samples > 0:
                 weighted_sum = sum(n * v for n, v in numeric_values)
                 aggregated[key] = weighted_sum / total_samples
+            elif numeric_values:
+                logger.warning(f"Cannot aggregate metric '{key}': total_samples is zero")
 
     return aggregated
 
@@ -361,6 +375,7 @@ def server_fn(context: fl.common.Context) -> ServerAppComponents:
     target_epsilon = float(config.get("privacy.target_epsilon", 8.0))
     target_delta = float(config.get("privacy.target_delta", 1e-5))
     enable_dp = bool(config.get("privacy.enable_dp", True))
+    max_grad_norm = float(config.get("privacy.max_grad_norm", 1.0))
 
     # Get logging settings
     save_metrics = bool(config.get("logging.save_metrics", True))
@@ -377,9 +392,10 @@ def server_fn(context: fl.common.Context) -> ServerAppComponents:
 
         # PRE-COMPUTE optimal noise multiplier using Opacus
         try:
+            client_dataset_size = int(config.get("privacy.client_dataset_size", 270))
             computed_noise, projected_epsilon = validate_privacy_config(
                 config=config,
-                client_dataset_size=270,  # TODO: Get from actual data or config
+                client_dataset_size=client_dataset_size,
             )
 
             # Override config value with pre-computed noise
@@ -421,6 +437,7 @@ def server_fn(context: fl.common.Context) -> ServerAppComponents:
         save_metrics=save_metrics,
         num_rounds=num_rounds,
         noise_multiplier=noise_multiplier,
+        max_grad_norm=max_grad_norm,
         fraction_fit=fraction_fit,
         fraction_evaluate=fraction_evaluate,
         min_fit_clients=min_fit_clients,

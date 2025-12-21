@@ -77,6 +77,10 @@ class Config:
                 errors.append("privacy.target_epsilon must be a number")
             if not isinstance(self.get("privacy.target_delta"), (int, float)):
                 errors.append("privacy.target_delta must be a number")
+            # Optional but validated if present
+            client_dataset_size = self.get("privacy.client_dataset_size")
+            if client_dataset_size is not None and not isinstance(client_dataset_size, int):
+                errors.append("privacy.client_dataset_size must be an integer")
 
         # If any errors, raise them all at once
         if errors:
