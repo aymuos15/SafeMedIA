@@ -24,7 +24,6 @@ class DPFedAvg(FedAvg):
 
     def __init__(
         self,
-        target_epsilon: float = 8.0,
         target_delta: float = 1e-5,
         run_dir: Optional[Path] = None,
         run_name: str = "default",
@@ -32,26 +31,30 @@ class DPFedAvg(FedAvg):
         num_rounds: Optional[int] = None,
         noise_multiplier: float = 1.0,
         max_grad_norm: float = 1.0,
+        user_noise_multiplier: float = 0.0,
+        user_max_grad_norm: float = 0.0,
+        total_clients: int = 10,
         start_round: int = 1,
         **kwargs,
     ):
         """Initialize DP-aware FedAvg.
 
         Args:
-            target_epsilon: Target privacy budget
             target_delta: Target delta for DP
             run_dir: Directory to save results
             run_name: Name of this run (config name)
             save_metrics: Whether to save metrics to file
             num_rounds: Total number of rounds (including completed rounds)
-            noise_multiplier: Pre-computed noise multiplier to use for all rounds
-            max_grad_norm: Maximum gradient norm for DP clipping
+            noise_multiplier: Pre-computed noise multiplier for sample-level DP
+            max_grad_norm: Maximum gradient norm for sample-level DP
+            user_noise_multiplier: Noise multiplier for user-level DP
+            user_max_grad_norm: Clipping norm for user-level DP
+            total_clients: Total number of clients in the population
             start_round: Starting round number (for checkpoint resumption)
             **kwargs: Additional arguments for FedAvg
         """
         super().__init__(**kwargs)
         self.privacy_accountant = PrivacyAccountant(
-            target_epsilon=target_epsilon,
             target_delta=target_delta,
         )
         self.run_dir = run_dir or Path("./results/default")
@@ -60,6 +63,9 @@ class DPFedAvg(FedAvg):
         self.num_rounds = num_rounds
         self.noise_multiplier = noise_multiplier
         self.max_grad_norm = max_grad_norm
+        self.user_noise_multiplier = user_noise_multiplier
+        self.user_max_grad_norm = user_max_grad_norm
+        self.total_clients = total_clients
         self.start_round = start_round
 
         # Server-level round metrics
@@ -75,9 +81,7 @@ class DPFedAvg(FedAvg):
 
         self.start_time = datetime.now().isoformat()
 
-        logger.info(
-            f"DPFedAvg initialized. Target ε = {target_epsilon}, δ = {target_delta}"
-        )
+        logger.info(f"DPFedAvg initialized. Target δ = {target_delta}")
         if start_round > 1:
             logger.info(f"Resuming from round {start_round}")
         logger.info(f"Results will be saved to: {self.run_dir.absolute()}")
@@ -88,9 +92,10 @@ class DPFedAvg(FedAvg):
         actual_round = self.start_round + server_round - 1
         self.current_round = actual_round
 
-        config = {
-            "noise_multiplier": self.noise_multiplier,
-            "server_round": actual_round,
+        # Ensure values are Scalar (int, float, str, bytes, bool)
+        config: Dict[str, Scalar] = {
+            "noise_multiplier": float(self.noise_multiplier),
+            "server_round": int(actual_round),
         }
 
         # Get standard sample
@@ -109,8 +114,8 @@ class DPFedAvg(FedAvg):
         # Calculate actual round number when resuming from checkpoint
         actual_round = self.start_round + server_round - 1
 
-        config = {
-            "server_round": actual_round,
+        config: Dict[str, Scalar] = {
+            "server_round": int(actual_round),
         }
 
         # Calculate sample size based on fraction_evaluate
@@ -142,53 +147,62 @@ class DPFedAvg(FedAvg):
             return None, {}
 
         # Collect per-client metrics
+        sample_rates = []
+        step_counts = []
         epsilons = []
         for client_proxy, fit_res in results:
             client_id = str(client_proxy.cid)
             metrics = fit_res.metrics or {}
 
             # Extract client metrics
-            eps = metrics.get("epsilon", 0.0)
-            if isinstance(eps, (int, float)) and eps > 0:
-                epsilons.append(float(eps))
+            eps_sample = float(metrics.get("epsilon", 0.0))
+            sample_rate = float(metrics.get("sample_rate", 0.0))
+            steps = int(metrics.get("steps", 0))
+
+            if eps_sample > 0:
+                epsilons.append(eps_sample)
+            if sample_rate > 0:
+                sample_rates.append(sample_rate)
+            if steps > 0:
+                step_counts.append(steps)
 
             # Store per-client training metrics
             client_round_data = {
                 "round": server_round,
                 "train_loss": float(metrics.get("loss", 0.0)),
-                "epsilon": float(eps),
+                "sample_epsilon": eps_sample,
                 "delta": float(metrics.get("delta", 1e-5)),
                 "num_samples": fit_res.num_examples,
             }
             self.client_metrics[client_id].append(client_round_data)
 
-        # Calculate average epsilon for this round
+        # Calculate metadata for RDP recording
         avg_epsilon = sum(epsilons) / len(epsilons) if epsilons else 0.0
+        avg_sample_rate = sum(sample_rates) / len(sample_rates) if sample_rates else 0.0
+        avg_steps = int(sum(step_counts) / len(step_counts)) if step_counts else 0
+
+        # User-level sampling rate: (participating clients / total clients)
+        user_sample_rate = (
+            len(results) / self.total_clients if self.total_clients > 0 else 0.0
+        )
 
         # Record in privacy accountant
-        if epsilons:
+
+        if avg_sample_rate > 0 or self.user_noise_multiplier > 0:
             total_samples = sum(fit_res.num_examples for _, fit_res in results)
             self.privacy_accountant.record_round(
                 round_num=server_round,
-                epsilon=avg_epsilon,
-                delta=self.privacy_accountant.target_delta,
-                noise_multiplier=self.noise_multiplier,
-                max_grad_norm=self.max_grad_norm,
+                noise_multiplier_sample=self.noise_multiplier,
+                sample_rate_sample=avg_sample_rate,
+                steps_sample=avg_steps,
+                noise_multiplier_user=self.user_noise_multiplier,
+                sample_rate_user=user_sample_rate
+                if self.user_noise_multiplier > 0
+                else 0.0,
+                steps_user=1
+                if self.user_noise_multiplier > 0
+                else 0,  # One step per round for server DP
                 num_samples=total_samples,
-            )
-
-        # Check if budget exceeded
-        if self.privacy_accountant.is_budget_exceeded():
-            logger.warning(
-                f"⚠ Privacy budget EXCEEDED! "
-                f"Cumulative ε = {self.privacy_accountant.get_cumulative_epsilon():.4f} "
-                f"> target ε = {self.privacy_accountant.target_epsilon}"
-            )
-        else:
-            remaining = self.privacy_accountant.get_remaining_budget()
-            remaining_pct = (remaining / self.privacy_accountant.target_epsilon) * 100
-            logger.info(
-                f"Privacy budget OK. Remaining: {remaining_pct:.1f}% ({remaining:.4f} ε)"
             )
 
         # Aggregate parameters using parent class
@@ -197,20 +211,23 @@ class DPFedAvg(FedAvg):
         )
 
         # Add privacy metrics
-        aggregated_metrics["round_epsilon"] = float(avg_epsilon)
-        aggregated_metrics["cumulative_epsilon"] = float(
-            self.privacy_accountant.get_cumulative_epsilon()
+        aggregated_metrics["round_sample_epsilon"] = float(avg_epsilon)
+        aggregated_metrics["cumulative_sample_epsilon"] = float(
+            self.privacy_accountant.get_cumulative_sample_epsilon()
         )
-        aggregated_metrics["remaining_budget"] = float(
-            self.privacy_accountant.get_remaining_budget()
+        aggregated_metrics["cumulative_user_epsilon"] = float(
+            self.privacy_accountant.get_cumulative_user_epsilon()
         )
 
         # Store server-level round metrics
         server_round_data = {
             "round": server_round,
-            "round_epsilon": float(avg_epsilon),
-            "cumulative_epsilon": float(
-                self.privacy_accountant.get_cumulative_epsilon()
+            "sample_epsilon": float(avg_epsilon),
+            "cumulative_sample_epsilon": float(
+                self.privacy_accountant.get_cumulative_sample_epsilon()
+            ),
+            "cumulative_user_epsilon": float(
+                self.privacy_accountant.get_cumulative_user_epsilon()
             ),
             "num_clients": len(results),
             "num_failures": len(failures),
@@ -222,8 +239,8 @@ class DPFedAvg(FedAvg):
 
         logger.info(
             f"Round {server_round} complete: "
-            f"ε = {avg_epsilon:.4f}, "
-            f"cumulative ε = {self.privacy_accountant.get_cumulative_epsilon():.4f}, "
+            f"ε_sample = {avg_epsilon:.4f}, "
+            f"cumulative ε_sample = {self.privacy_accountant.get_cumulative_sample_epsilon():.4f}, "
             f"clients = {len(results)}"
         )
 
@@ -322,7 +339,10 @@ class DPFedAvg(FedAvg):
             model_or_params=self.latest_parameters,
             dice_score=current_dice,
             round_num=self.current_round,
-            cumulative_epsilon=self.privacy_accountant.get_cumulative_epsilon(),
+            cumulative_epsilon=self.privacy_accountant.get_cumulative_sample_epsilon(),
+            extra_metadata={
+                "cumulative_user_epsilon": self.privacy_accountant.get_cumulative_user_epsilon()
+            },
         )
 
     def save_logs(self) -> None:

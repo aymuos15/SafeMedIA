@@ -16,7 +16,6 @@ class TestCheckpointMetadata:
     def dummy_strategy(self, tmp_path):
         """Create a DPFedAvg strategy for testing."""
         return DPFedAvg(
-            target_epsilon=8.0,
             target_delta=1e-5,
             run_dir=tmp_path,
             run_name="test",
@@ -71,10 +70,12 @@ class TestCheckpointMetadata:
         # Record some privacy spending
         dummy_strategy.privacy_accountant.record_round(
             round_num=1,
-            epsilon=0.5,
-            delta=1e-5,
-            noise_multiplier=1.0,
-            max_grad_norm=1.0,
+            noise_multiplier_sample=1.0,
+            sample_rate_sample=0.01,
+            steps_sample=10,
+            noise_multiplier_user=0.0,
+            sample_rate_user=0.0,
+            steps_user=0,
             num_samples=100,
         )
 
@@ -213,7 +214,6 @@ class TestStartRoundOffset:
     def test_configure_fit_uses_actual_round(self):
         """Test that configure_fit uses actual round when resuming."""
         strategy = DPFedAvg(
-            target_epsilon=8.0,
             target_delta=1e-5,
             start_round=4,  # Resuming from round 4
             num_rounds=10,
@@ -245,7 +245,6 @@ class TestStartRoundOffset:
     def test_configure_evaluate_uses_actual_round(self):
         """Test that configure_evaluate uses actual round when resuming."""
         strategy = DPFedAvg(
-            target_epsilon=8.0,
             target_delta=1e-5,
             start_round=3,  # Resuming from round 3
             num_rounds=10,
@@ -276,7 +275,6 @@ class TestStartRoundOffset:
     def test_fresh_start_has_start_round_one(self):
         """Test that fresh start (no resume) has start_round=1."""
         strategy = DPFedAvg(
-            target_epsilon=8.0,
             target_delta=1e-5,
             # No start_round specified, should default to 1
             num_rounds=10,

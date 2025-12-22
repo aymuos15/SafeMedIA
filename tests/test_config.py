@@ -237,11 +237,11 @@ local_epochs = 2
 learning_rate = 0.01
 
 [privacy]
-enable_dp = true
+style = "sample"
+target_delta = 1e-5
+[privacy.sample]
 noise_multiplier = 1.0
 max_grad_norm = 1.0
-target_epsilon = 4.0
-target_delta = 1e-5
 """
         config_file = tmp_path / "test_config.toml"
         config_file.write_text(config_content)
@@ -250,7 +250,7 @@ target_delta = 1e-5
 
         assert config.data.image_size == 128
         assert config.federated.num_rounds == 3
-        assert config.privacy.target_epsilon == 4.0
+        assert config.privacy.sample.noise_multiplier == 1.0
 
     def test_load_nonexistent_config_raises_error(self):
         """Test that loading non-existent config raises FileNotFoundError."""
@@ -282,7 +282,7 @@ local_epochs = 2
 learning_rate = 0.01
 
 [privacy]
-enable_dp = true
+style = "none"
 """
         config_file = tmp_path / "minimal_config.toml"
         config_file.write_text(config_content)
@@ -293,3 +293,4 @@ enable_dp = true
         assert config.loss.type == "cross_entropy"
         assert config.checkpointing.enabled is True
         assert config.logging.level == "INFO"
+        assert config.privacy.style == "none"

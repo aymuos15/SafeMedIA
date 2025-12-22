@@ -22,13 +22,10 @@ def compute_noise_multiplier(
     Uses Opacus RDPAccountant to calculate minimum noise_multiplier
     that keeps cumulative epsilon within target across all federated rounds.
 
-    NOTE: Uses LINEAR composition to match federated learning architecture
-    where each client creates a fresh PrivacyEngine per round. This simulates
-    privacy consumption for ONE round, then projects total epsilon as:
-        total_epsilon = epsilon_per_round * num_rounds
-
-    This is conservative but standard practice in FL literature, as it matches
-    the actual behavior of clients that reset their privacy accountant each round.
+    NOTE: Uses RDP composition to match the server-side accounting.
+    While each client creates a fresh PrivacyEngine per round, the server
+    tracks the cumulative privacy loss using a single RDP history across
+    all rounds, which is much tighter than linear composition.
 
     Args:
         target_epsilon: Target privacy budget (e.g., 8.0)
@@ -48,7 +45,7 @@ def compute_noise_multiplier(
     # Calculate training parameters
     steps_per_epoch = dataset_size // batch_size
     steps_per_round = local_epochs * steps_per_epoch
-    total_steps = steps_per_round * num_rounds
+    total_steps = int(steps_per_round * num_rounds)
     sample_rate = batch_size / dataset_size
 
     logger.info("=" * 60)
@@ -60,7 +57,7 @@ def compute_noise_multiplier(
     logger.info(f"Total gradient steps: {total_steps}")
     logger.info(f"Steps per round: {steps_per_round}")
     logger.info(f"Sample rate: {sample_rate:.4f}")
-    logger.info("Composition: LINEAR (fresh accountant per round)")
+    logger.info("Composition: RDP (cumulative history)")
 
     # Candidate noise multipliers (ascending order for best utility)
     noise_candidates = [
@@ -94,32 +91,25 @@ def compute_noise_multiplier(
     logger.info("Testing noise multipliers...")
 
     for noise in noise_candidates:
-        # Create fresh accountant for each test
+        # Create accountant
         accountant = RDPAccountant()
 
-        # Simulate privacy consumption for ONE ROUND only
-        # This matches the actual client behavior where PrivacyEngine
-        # is recreated each round, resetting the privacy accountant
-        for _ in range(int(steps_per_round)):
+        # Simulate privacy consumption for ALL ROUNDS using RDP
+        # Since the server tracks the cumulative history, we can
+        # just take total_steps in the calculation.
+        for _ in range(total_steps):
             accountant.step(noise_multiplier=noise, sample_rate=sample_rate)
 
-        # Get epsilon consumed in one round
-        epsilon_per_round = accountant.get_epsilon(delta=target_delta)
+        # Get total epsilon
+        projected_epsilon = accountant.get_epsilon(delta=target_delta)
 
-        # Project total epsilon using linear composition
-        # (since client resets accountant each round)
-        projected_epsilon = epsilon_per_round * num_rounds
-
-        logger.debug(
-            f"  noise={noise:.2f} → ε_per_round={epsilon_per_round:.4f}, projected_total={projected_epsilon:.4f}"
-        )
+        logger.debug(f"  noise={noise:.2f} → projected_total={projected_epsilon:.4f}")
 
         # Check if this satisfies budget
         if projected_epsilon <= target_epsilon:
             best_noise = noise
             best_epsilon = projected_epsilon
             logger.info(f"✓ Found feasible solution: noise={noise:.3f}")
-            logger.info(f"  Epsilon per round: {epsilon_per_round:.4f}")
             logger.info(
                 f"  Projected total ε: {projected_epsilon:.4f} / {target_epsilon:.4f}"
             )
@@ -136,10 +126,9 @@ def compute_noise_multiplier(
 
         # Test with maximum noise to show what's achievable
         accountant = RDPAccountant()
-        for _ in range(int(steps_per_round)):
+        for _ in range(total_steps):
             accountant.step(noise_multiplier=10.0, sample_rate=sample_rate)
-        epsilon_per_round_max = accountant.get_epsilon(delta=target_delta)
-        achievable_epsilon = float(epsilon_per_round_max * num_rounds)
+        achievable_epsilon = accountant.get_epsilon(delta=target_delta)
 
         error_msg = (
             f"Cannot satisfy target ε={target_epsilon:.2f} with current configuration.\n\n"

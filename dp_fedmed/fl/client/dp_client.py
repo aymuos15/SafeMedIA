@@ -7,13 +7,16 @@ with differential privacy using Opacus.
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Dict, Tuple, cast
 
 import torch
+import torch.nn as nn
+import torch.optim as optim
 import torch.utils.data
 from flwr.client import NumPyClient
 from flwr.common import NDArrays, Scalar
 from opacus import PrivacyEngine
+from opacus.grad_sample.grad_sample_module import GradSampleModule
 from loguru import logger
 
 
@@ -59,12 +62,12 @@ class DPFlowerClient(NumPyClient):
         self.loss_config = loss_config or {}
 
         # Track metrics across rounds
-        self.round_history = []
+        self.round_history: list = []
         self._load_history()
-        self.start_time = datetime.now().isoformat()
+        self.start_time: str = datetime.now().isoformat()
 
         # Create model from config
-        self.model = create_unet2d(
+        self.model: nn.Module | GradSampleModule = create_unet2d(
             in_channels=model_config.get("in_channels", 1),
             out_channels=model_config.get("out_channels", 2),
             channels=tuple(model_config.get("channels", [16, 32, 64, 128])),
@@ -74,17 +77,17 @@ class DPFlowerClient(NumPyClient):
         self.model.to(self.device)
 
         # Will be set up each round
-        self.optimizer = None
-        self.privacy_engine = None
-        self._dp_train_loader = None
+        self.optimizer: optim.Optimizer | None = None
+        self.privacy_engine: PrivacyEngine | None = None
+        self._dp_train_loader: torch.utils.data.DataLoader | None = None
 
     def get_parameters(self, config: Dict[str, Scalar]) -> NDArrays:
         """Get model parameters."""
-        return get_parameters(self.model)
+        return get_parameters(cast(nn.Module, self.model))
 
     def set_parameters(self, parameters: NDArrays) -> None:
         """Set model parameters."""
-        set_parameters(self.model, parameters)
+        set_parameters(cast(nn.Module, self.model), parameters)
 
     def fit(
         self,
@@ -108,37 +111,34 @@ class DPFlowerClient(NumPyClient):
         lr = float(self.training_config.get("learning_rate", 0.001))
         momentum = float(self.training_config.get("momentum", 0.9))
 
+        # Get privacy style
+        privacy_style = self.privacy_config.get("style", "sample")
+        enable_sample_dp = privacy_style in ["sample", "hybrid"]
+
         # Get privacy parameters
-        enable_dp = bool(self.privacy_config.get("enable_dp", True))
-        max_grad_norm = float(self.privacy_config.get("max_grad_norm", 1.0))
+        sample_config = self.privacy_config.get("sample", {})
+        max_grad_norm = float(sample_config.get("max_grad_norm", 1.0))
         target_delta = float(self.privacy_config.get("target_delta", 1e-5))
 
         # USE SERVER-PROVIDED NOISE MULTIPLIER (pre-computed)
         noise_multiplier = float(config.get("noise_multiplier", 1.0))
 
         logger.info(
-            f"Round {config.get('server_round', '?')}: Using noise_multiplier = {noise_multiplier:.4f}"
+            f"Round {config.get('server_round', '?')}: Style={privacy_style}, noise_multiplier={noise_multiplier:.4f}"
         )
 
-        # Validate privacy parameters
-        if enable_dp:
-            if max_grad_norm <= 0:
-                logger.warning(
-                    f"Invalid max_grad_norm {max_grad_norm}, using default 1.0"
-                )
-                max_grad_norm = 1.0
-            if noise_multiplier <= 0:
-                logger.warning(
-                    f"Invalid noise_multiplier {noise_multiplier}, using default 1.0"
-                )
-                noise_multiplier = 1.0
-            if target_delta <= 0 or target_delta >= 1:
-                logger.warning(
-                    f"Invalid target_delta {target_delta}, using default 1e-5"
-                )
-                target_delta = 1e-5
+        # CRITICAL: Unwrap model if already wrapped from previous round
+        # Opacus wraps the model with GradSampleModule, which must be unwrapped
+        # before re-wrapping to prevent hook conflicts that cause:
+        # "Per sample gradient is not initialized. Not updated in backward pass?"
+        if isinstance(self.model, GradSampleModule):
+            logger.debug("Unwrapping GradSampleModule for next round")
+            self.model = self.model.to_standard_module()
 
-        # Set up optimizer
+        # Ensure all gradients are cleared
+        self.model.zero_grad(set_to_none=True)
+
+        # Set up optimizer (must be created AFTER unwrapping)
         self.optimizer = torch.optim.SGD(  # type: ignore
             self.model.parameters(),
             lr=lr,
@@ -146,27 +146,45 @@ class DPFlowerClient(NumPyClient):
         )
 
         epsilon = 0.0  # Will be updated if DP is enabled
+        sample_rate = 0.0
+        steps = 0
 
-        if enable_dp:
+        if enable_sample_dp:
             # Set up privacy engine
-            self.privacy_engine = PrivacyEngine()
+            privacy_engine = PrivacyEngine()
+            self.privacy_engine = privacy_engine
 
             # Wrap model, optimizer, and data loader with DP
-            self.model, self.optimizer, self._dp_train_loader = (
-                self.privacy_engine.make_private(
-                    module=self.model,
+            # Note: make_private handles GradSampleModule wrapping
+            try:
+                model, optimizer, self._dp_train_loader = privacy_engine.make_private(
+                    module=cast(nn.Module, self.model),
                     optimizer=self.optimizer,
                     data_loader=self.train_loader,
                     noise_multiplier=noise_multiplier,
                     max_grad_norm=max_grad_norm,
                 )
-            )
+                self.model = model
+                self.optimizer = optimizer
+            except Exception as e:
+                logger.error(f"Failed to make model private: {e}")
+                # Fallback or re-raise
+                raise
 
             train_loader = self._dp_train_loader
-            logger.info(f"DP enabled: noise={noise_multiplier}, clip={max_grad_norm}")
+            # Opacus DPDataLoader has sample_rate
+            sample_rate = getattr(self._dp_train_loader, "sample_rate", 0.0)
+            if train_loader is None:
+                raise ValueError("DP training loader is None after make_private")
+            steps = len(train_loader) * local_epochs
+            logger.info(
+                f"Sample-level DP enabled: noise={noise_multiplier}, clip={max_grad_norm}"
+            )
         else:
             train_loader = self.train_loader
-            logger.info("DP disabled - training without privacy")
+            sample_rate = 0.0
+            steps = len(train_loader) * local_epochs
+            logger.info(f"Sample-level DP disabled (style: {privacy_style})")
 
         # Set up checkpoint directory
         checkpoint_dir = None
@@ -177,7 +195,7 @@ class DPFlowerClient(NumPyClient):
         total_loss = 0.0
         for epoch in range(local_epochs):
             epoch_loss = train_one_epoch(
-                self.model,
+                cast(nn.Module, self.model),
                 train_loader,
                 self.optimizer,
                 self.device,
@@ -190,7 +208,7 @@ class DPFlowerClient(NumPyClient):
             )
 
         # Get privacy spent
-        if enable_dp and self.privacy_engine is not None:
+        if enable_sample_dp and self.privacy_engine is not None:
             epsilon = self.privacy_engine.get_epsilon(delta=target_delta)
             logger.info(
                 f"Training complete. Privacy spent: ε = {epsilon:.4f}, δ = {target_delta}"
@@ -210,7 +228,7 @@ class DPFlowerClient(NumPyClient):
             "round": int(config.get("server_round", 0)),
             "train_loss": float(total_loss / local_epochs),
             "epsilon": float(epsilon),
-            "delta": float(target_delta if enable_dp else 0.0),
+            "delta": float(target_delta if enable_sample_dp else 0.0),
             "num_samples": num_train_samples,
         }
 
@@ -226,12 +244,14 @@ class DPFlowerClient(NumPyClient):
             num_fit_samples = 0
 
         return (
-            get_parameters(self.model),
+            get_parameters(cast(nn.Module, self.model)),
             num_fit_samples,
             {
                 "loss": float(total_loss / local_epochs),
                 "epsilon": float(epsilon),
-                "delta": float(target_delta if enable_dp else 0.0),
+                "delta": float(target_delta if enable_sample_dp else 0.0),
+                "sample_rate": float(sample_rate),
+                "steps": int(steps),
             },
         )
 
@@ -257,7 +277,10 @@ class DPFlowerClient(NumPyClient):
             checkpoint_dir = self.run_dir / "checkpoints"
 
         metrics = evaluate(
-            self.model, self.test_loader, self.device, checkpoint_dir=checkpoint_dir
+            cast(nn.Module, self.model),
+            self.test_loader,
+            self.device,
+            checkpoint_dir=checkpoint_dir,
         )
 
         logger.debug(
@@ -300,14 +323,6 @@ class DPFlowerClient(NumPyClient):
             num_test_samples = len(self.test_loader.dataset)  # type: ignore
         except (TypeError, AttributeError):
             num_test_samples = 0
-
-        return (
-            metrics["loss"],
-            num_test_samples,
-            {
-                "dice": metrics["dice"],
-            },
-        )
 
         return (
             metrics["loss"],

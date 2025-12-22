@@ -1,11 +1,39 @@
 """Configuration loading and validation for DP-FedMed using Pydantic."""
 
+from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 import tomli
 from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+
+class DPStyle(str, Enum):
+    """Differential privacy styles."""
+
+    NONE = "none"
+    SAMPLE = "sample"
+    USER = "user"
+    HYBRID = "hybrid"
+
+
+class SampleDPConfig(BaseModel):
+    """Configuration for sample-level (Opacus) DP."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    noise_multiplier: float = Field(default=1.0, gt=0.0)
+    max_grad_norm: float = Field(default=1.0, gt=0.0)
+
+
+class UserDPConfig(BaseModel):
+    """Configuration for user-level (Server-side) DP."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    noise_multiplier: float = Field(default=0.5, gt=0.0)
+    max_grad_norm: float = Field(default=0.1, gt=0.0)
 
 
 class DataConfig(BaseModel):
@@ -105,21 +133,13 @@ class PrivacyConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    enable_dp: bool = True
-    noise_multiplier: float = Field(default=1.0, gt=0.0)
-    max_grad_norm: float = Field(default=1.0, gt=0.0)
-    target_epsilon: float = Field(default=8.0, gt=0.0)
+    style: DPStyle = Field(default=DPStyle.SAMPLE)
     target_delta: float = Field(default=1e-5, gt=0.0, lt=1.0)
     client_dataset_size: Optional[int] = Field(default=None, ge=1)
 
-    @model_validator(mode="after")
-    def validate_dp_params(self) -> "PrivacyConfig":
-        if self.enable_dp:
-            if self.noise_multiplier <= 0:
-                raise ValueError("noise_multiplier must be positive when DP is enabled")
-            if self.max_grad_norm <= 0:
-                raise ValueError("max_grad_norm must be positive when DP is enabled")
-        return self
+    # Specific configurations for each layer
+    sample: SampleDPConfig = Field(default_factory=SampleDPConfig)
+    user: UserDPConfig = Field(default_factory=UserDPConfig)
 
 
 class LossConfig(BaseModel):
@@ -283,7 +303,7 @@ def load_config(config_path: Union[str, Path]) -> Config:
     logger.info(f"  Data directory: {config.data.data_dir}")
     logger.info(f"  Clients: {config.federated.num_clients}")
     logger.info(f"  Rounds: {config.federated.num_rounds}")
-    logger.info(f"  DP enabled: {config.privacy.enable_dp}")
+    logger.info(f"  DP style: {config.privacy.style}")
 
     return config
 

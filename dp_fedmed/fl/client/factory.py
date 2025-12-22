@@ -6,6 +6,7 @@ DPFlowerClient instances for federated learning.
 
 from pathlib import Path
 
+from typing import Any
 import torch.utils.data
 import flwr as fl
 from flwr.common import Context
@@ -16,6 +17,24 @@ from ...config import load_config
 from ...logging import setup_logging
 from ...data.cellpose import build_data_list, get_transforms
 from .dp_client import DPFlowerClient
+
+
+class TupleDataset(torch.utils.data.Dataset):
+    """Wrapper for MONAI Dataset to return (image, label) tuples.
+
+    Opacus's DPDataLoader expects standard (data, target) tuples rather than
+    the dictionaries returned by MONAI datasets.
+    """
+
+    def __init__(self, dataset: Dataset):
+        self.dataset = dataset
+
+    def __len__(self) -> int:
+        return len(self.dataset)  # type: ignore
+
+    def __getitem__(self, index: int) -> tuple[Any, Any]:
+        data = self.dataset[index]
+        return data["image"], data["label"]
 
 
 def client_fn(context: Context) -> fl.client.Client:
@@ -94,6 +113,11 @@ def client_fn(context: Context) -> fl.client.Client:
     client_train_dataset = Dataset(data=client_train_data, transform=train_transforms)
     test_dataset = Dataset(data=test_data, transform=test_transforms)
 
+    # Wrap training dataset to return tuples for Opacus compatibility
+    # Also set num_workers=0 for training to avoid Opacus multiprocessing issues
+    client_train_dataset = TupleDataset(client_train_dataset)
+    train_num_workers = 0
+
     # Determine device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Using device: {device}")
@@ -104,7 +128,7 @@ def client_fn(context: Context) -> fl.client.Client:
         client_train_dataset,
         batch_size=batch_size,
         shuffle=True,
-        num_workers=num_workers,
+        num_workers=train_num_workers,
     )
 
     test_loader = torch.utils.data.DataLoader(

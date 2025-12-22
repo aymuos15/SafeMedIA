@@ -35,13 +35,19 @@ optimizer = "sgd"
 momentum = 0.9
 
 [privacy]
-# Low privacy: epsilon = 8.0
-enable_dp = true
+# DP style options: "none", "sample", "user", "hybrid"
+style = "hybrid"
+target_delta = 1.0e-5
+client_dataset_size = 270
+
+[privacy.sample]
 noise_multiplier = 1.0
 max_grad_norm = 1.0
-target_epsilon = 8.0  # Higher epsilon for better utility
-target_delta = 1.0e-5
-client_dataset_size = 270  # Samples per client for privacy budget calculation
+
+[privacy.user]
+noise_multiplier = 0.5
+max_grad_norm = 0.1
+  # Samples per client for privacy budget calculation
 
 [loss]
 type = "dice_ce"  # Options: "cross_entropy", "soft_dice", "dice_ce"

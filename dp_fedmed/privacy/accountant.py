@@ -2,108 +2,128 @@
 
 import json
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Dict, List
+from opacus.accountants import RDPAccountant
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass
 class PrivacyMetrics:
-    """Privacy metrics for a single round."""
+    """Privacy metadata for a single round to support RDP composition."""
 
     round_num: int
-    epsilon: float
-    delta: float
-    noise_multiplier: float
-    max_grad_norm: float
-    num_samples: int
+    # Sample-level (local) parameters
+    noise_multiplier_sample: float
+    sample_rate_sample: float
+    steps_sample: int
+    # User-level (global) parameters
+    noise_multiplier_user: float
+    sample_rate_user: float
+    steps_user: int
+
+    num_samples: int  # Total training samples in this round
 
 
-@dataclass
 class PrivacyAccountant:
     """Track privacy budget consumption across federated rounds.
 
-    Uses simple composition for epsilon accumulation.
-    For tighter bounds, consider using Opacus's RDP accountant.
+    Uses Renyi Differential Privacy (RDP) for tight composition bounds.
+    Tracks both sample-level (Opacus) and user-level (Server) privacy.
     """
 
-    target_epsilon: float
-    target_delta: float = 1e-5
-    rounds: List[PrivacyMetrics] = field(default_factory=list)
+    def __init__(self, target_delta: float = 1e-5):
+        self.target_delta = target_delta
+        self.rounds: List[PrivacyMetrics] = []
+
+        # Internal Opacus accountants for RDP composition
+        self.sample_accountant = RDPAccountant()
+        self.user_accountant = RDPAccountant()
 
     def record_round(
         self,
         round_num: int,
-        epsilon: float,
-        delta: float,
-        noise_multiplier: float,
-        max_grad_norm: float,
+        noise_multiplier_sample: float,
+        sample_rate_sample: float,
+        steps_sample: int,
+        noise_multiplier_user: float,
+        sample_rate_user: float,
+        steps_user: int,
         num_samples: int,
     ) -> None:
-        """Record privacy metrics for a round."""
+        """Record privacy metrics for a round and update RDP history."""
         metrics = PrivacyMetrics(
             round_num=round_num,
-            epsilon=epsilon,
-            delta=delta,
-            noise_multiplier=noise_multiplier,
-            max_grad_norm=max_grad_norm,
+            noise_multiplier_sample=noise_multiplier_sample,
+            sample_rate_sample=sample_rate_sample,
+            steps_sample=steps_sample,
+            noise_multiplier_user=noise_multiplier_user,
+            sample_rate_user=sample_rate_user,
+            steps_user=steps_user,
             num_samples=num_samples,
         )
         self.rounds.append(metrics)
+
+        # Update sample-level accountant
+        if noise_multiplier_sample > 0:
+            self.sample_accountant.history.append(
+                (noise_multiplier_sample, sample_rate_sample, steps_sample)
+            )
+
+        # Update user-level accountant
+        if noise_multiplier_user > 0:
+            self.user_accountant.history.append(
+                (noise_multiplier_user, sample_rate_user, steps_user)
+            )
+
         logger.info(
-            f"Round {round_num}: epsilon={epsilon:.4f}, "
-            f"cumulative_epsilon={self.get_cumulative_epsilon():.4f}"
+            f"Round {round_num} recorded: "
+            f"cumulative_sample_eps={self.get_cumulative_sample_epsilon():.4f}, "
+            f"cumulative_user_eps={self.get_cumulative_user_epsilon():.4f} "
+            f"(δ={self.target_delta})"
         )
 
-    def get_cumulative_epsilon(self) -> float:
-        """Get cumulative epsilon using simple composition.
+    def get_cumulative_sample_epsilon(self) -> float:
+        """Get cumulative sample-level epsilon using RDP composition."""
+        if not self.sample_accountant.history:
+            return 0.0
+        return self.sample_accountant.get_epsilon(delta=self.target_delta)
 
-        Note: This is a loose upper bound. For production, use
-        Opacus's RDP accountant for tighter composition.
-        """
-        return sum(r.epsilon for r in self.rounds)
-
-    def get_cumulative_delta(self) -> float:
-        """Get cumulative delta using simple composition."""
-        return sum(r.delta for r in self.rounds)
-
-    def is_budget_exceeded(self) -> bool:
-        """Check if privacy budget is exceeded."""
-        return self.get_cumulative_epsilon() > self.target_epsilon
-
-    def get_remaining_budget(self) -> float:
-        """Get remaining privacy budget."""
-        return max(0, self.target_epsilon - self.get_cumulative_epsilon())
+    def get_cumulative_user_epsilon(self) -> float:
+        """Get cumulative user-level epsilon using RDP composition."""
+        if not self.user_accountant.history:
+            return 0.0
+        return self.user_accountant.get_epsilon(delta=self.target_delta)
 
     def get_summary(self) -> Dict:
         """Get summary of privacy consumption."""
         return {
-            "target_epsilon": self.target_epsilon,
             "target_delta": self.target_delta,
-            "cumulative_epsilon": self.get_cumulative_epsilon(),
-            "cumulative_delta": self.get_cumulative_delta(),
-            "remaining_budget": self.get_remaining_budget(),
-            "budget_exceeded": self.is_budget_exceeded(),
+            "cumulative_sample_epsilon": self.get_cumulative_sample_epsilon(),
+            "cumulative_user_epsilon": self.get_cumulative_user_epsilon(),
             "num_rounds": len(self.rounds),
-            "per_round_epsilon": [r.epsilon for r in self.rounds],
+            "history": [
+                {
+                    "round": r.round_num,
+                    "sample": {
+                        "noise": r.noise_multiplier_sample,
+                        "rate": r.sample_rate_sample,
+                        "steps": r.steps_sample,
+                    },
+                    "user": {
+                        "noise": r.noise_multiplier_user,
+                        "rate": r.sample_rate_user,
+                        "steps": r.steps_user,
+                    },
+                }
+                for r in self.rounds
+            ],
         }
 
     def save(self, path: str) -> None:
         """Save privacy log to JSON file."""
         summary = self.get_summary()
-        summary["rounds"] = [
-            {
-                "round_num": r.round_num,
-                "epsilon": r.epsilon,
-                "delta": r.delta,
-                "noise_multiplier": r.noise_multiplier,
-                "max_grad_norm": r.max_grad_norm,
-                "num_samples": r.num_samples,
-            }
-            for r in self.rounds
-        ]
-
         with open(path, "w") as f:
             json.dump(summary, f, indent=2)
         logger.info(f"Privacy log saved to {path}")
@@ -114,88 +134,16 @@ class PrivacyAccountant:
         with open(path, "r") as f:
             data = json.load(f)
 
-        accountant = cls(
-            target_epsilon=data["target_epsilon"],
-            target_delta=data["target_delta"],
-        )
-
-        for r in data.get("rounds", []):
+        accountant = cls(target_delta=data["target_delta"])
+        for entry in data.get("history", []):
             accountant.record_round(
-                round_num=r["round_num"],
-                epsilon=r["epsilon"],
-                delta=r["delta"],
-                noise_multiplier=r["noise_multiplier"],
-                max_grad_norm=r["max_grad_norm"],
-                num_samples=r["num_samples"],
+                round_num=entry["round"],
+                noise_multiplier_sample=entry["sample"]["noise"],
+                sample_rate_sample=entry["sample"]["rate"],
+                steps_sample=entry["sample"]["steps"],
+                noise_multiplier_user=entry["user"]["noise"],
+                sample_rate_user=entry["user"]["rate"],
+                steps_user=entry["user"]["steps"],
+                num_samples=0,  # Not critical for RDP calculation
             )
-
         return accountant
-
-
-class ClientPrivacyTracker:
-    """Track privacy budget per client in federated setting."""
-
-    def __init__(
-        self,
-        num_clients: int,
-        target_epsilon: float,
-        target_delta: float = 1e-5,
-    ):
-        self.num_clients = num_clients
-        self.target_epsilon = target_epsilon
-        self.target_delta = target_delta
-        self.client_accountants: Dict[int, PrivacyAccountant] = {
-            i: PrivacyAccountant(target_epsilon, target_delta)
-            for i in range(num_clients)
-        }
-
-    def record_client_round(
-        self,
-        client_id: int,
-        round_num: int,
-        epsilon: float,
-        delta: float,
-        noise_multiplier: float,
-        max_grad_norm: float,
-        num_samples: int,
-    ) -> None:
-        """Record privacy metrics for a client's round."""
-        self.client_accountants[client_id].record_round(
-            round_num=round_num,
-            epsilon=epsilon,
-            delta=delta,
-            noise_multiplier=noise_multiplier,
-            max_grad_norm=max_grad_norm,
-            num_samples=num_samples,
-        )
-
-    def get_client_epsilon(self, client_id: int) -> float:
-        """Get cumulative epsilon for a client."""
-        return self.client_accountants[client_id].get_cumulative_epsilon()
-
-    def is_client_budget_exceeded(self, client_id: int) -> bool:
-        """Check if a client's budget is exceeded."""
-        return self.client_accountants[client_id].is_budget_exceeded()
-
-    def get_active_clients(self) -> List[int]:
-        """Get list of clients that haven't exceeded their budget."""
-        return [
-            i for i in range(self.num_clients) if not self.is_client_budget_exceeded(i)
-        ]
-
-    def get_summary(self) -> Dict:
-        """Get summary of all clients' privacy consumption."""
-        return {
-            "target_epsilon": self.target_epsilon,
-            "target_delta": self.target_delta,
-            "clients": {
-                i: self.client_accountants[i].get_summary()
-                for i in range(self.num_clients)
-            },
-            "active_clients": self.get_active_clients(),
-        }
-
-    def save(self, path: str) -> None:
-        """Save all privacy logs to JSON file."""
-        with open(path, "w") as f:
-            json.dump(self.get_summary(), f, indent=2)

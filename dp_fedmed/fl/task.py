@@ -23,6 +23,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from monai.metrics.meandice import DiceMetric
+from loguru import logger
 
 from dp_fedmed.losses.dice import get_loss_function
 from .checkpoint import save_model_checkpoint
@@ -58,7 +59,7 @@ def train_one_epoch(
             criterion = get_loss_function(loss_config)
         else:
             # Default to CrossEntropyLoss for backward compatibility
-            criterion = nn.CrossEntropyLoss()
+            criterion = nn.CrossEntropyLoss(reduction="mean")
 
     total_loss = 0.0
     num_batches = 0
@@ -73,18 +74,34 @@ def train_one_epoch(
             images = images.to(device)
             labels = labels.to(device)
 
-        optimizer.zero_grad()
-
-        outputs = model(images)
-
-        # CrossEntropyLoss expects: outputs=[B, C, H, W], labels=[B, H, W]
-        # Ensure labels are [B, H, W] and long type
+        # Ensure labels are [B, H, W] and long type for standard losses
         if labels.dim() == 4 and labels.shape[1] == 1:
-            labels = labels.squeeze(1).long()
+            labels = labels.squeeze(1)
 
+        labels = labels.long()
+
+        optimizer.zero_grad(set_to_none=True)
+        outputs = model(images)
         loss = criterion(outputs, labels)
 
+        if not torch.isfinite(loss):
+            continue
+
         loss.backward()
+
+        # Check if gradients were actually computed
+        # Use getattr for Opacus-wrapped parameters which might use grad_sample
+        has_grads = False
+        for p in model.parameters():
+            if p.requires_grad:
+                if p.grad is not None or getattr(p, "grad_sample", None) is not None:
+                    has_grads = True
+                    break
+
+        if not has_grads:
+            logger.warning("No gradients computed in backward pass!")
+            continue
+
         optimizer.step()
 
         total_loss += loss.item()
@@ -140,7 +157,9 @@ def evaluate(
             # Compute loss
             # Ensure labels are [B, H, W] and long type
             if labels.dim() == 4 and labels.shape[1] == 1:
-                labels = labels.squeeze(1).long()
+                labels = labels.squeeze(1)
+
+            labels = labels.long()
 
             loss = criterion(outputs, labels)
             total_loss += loss.item()

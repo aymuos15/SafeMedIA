@@ -16,7 +16,6 @@ from loguru import logger
 from ...config import load_config
 from ...logging import setup_logging
 from ...models.unet2d import create_unet2d, get_parameters, set_parameters
-from ...privacy.budget_calculator import validate_privacy_config
 from .strategy import DPFedAvg
 from .aggregation import weighted_average
 
@@ -98,12 +97,27 @@ def server_fn(context: fl.common.Context) -> ServerAppComponents:
     min_fit_clients = int(config.get("federated.min_fit_clients", 2))
     min_evaluate_clients = int(config.get("federated.min_evaluate_clients", 2))
     min_available_clients = int(config.get("federated.min_available_clients", 2))
+    num_clients = int(config.get("federated.num_clients", 10))
 
     # Get privacy settings
-    target_epsilon = float(config.get("privacy.target_epsilon", 8.0))
-    target_delta = float(config.get("privacy.target_delta", 1e-5))
-    enable_dp = bool(config.get("privacy.enable_dp", True))
-    max_grad_norm = float(config.get("privacy.max_grad_norm", 1.0))
+    privacy_style = config.privacy.style
+    target_delta = config.privacy.target_delta
+
+    # Validate min_fit_clients for user-level DP (Literature recommendation: N >= 10)
+    if privacy_style in ["user", "hybrid"] and min_fit_clients < 10:
+        logger.warning(
+            f"⚠ UNSAFE CONFIGURATION: min_fit_clients ({min_fit_clients}) is less than 10. "
+            "User-level DP requires a larger crowd to be statistically meaningful and provide utility. "
+            "Proceeding anyway, but results may be poor or privacy guarantees weak."
+        )
+
+    # Sample-level (Opacus) settings
+    sample_noise_multiplier = config.privacy.sample.noise_multiplier
+    sample_max_grad_norm = config.privacy.sample.max_grad_norm
+
+    # User-level (Server) settings
+    user_noise_multiplier = config.privacy.user.noise_multiplier
+    user_max_grad_norm = config.privacy.user.max_grad_norm
 
     # Get logging settings
     save_metrics = bool(config.get("logging.save_metrics", True))
@@ -112,33 +126,26 @@ def server_fn(context: fl.common.Context) -> ServerAppComponents:
     logger.info(f"Federated rounds: {num_rounds}")
     logger.info(f"Min fit clients: {min_fit_clients}")
     logger.info(f"Min evaluate clients: {min_evaluate_clients}")
+    logger.info(f"Privacy Style: {privacy_style}")
 
-    if enable_dp:
-        logger.info("Differential Privacy: ENABLED")
-        logger.info(f"  Target ε = {target_epsilon}")
-        logger.info(f"  Target δ = {target_delta}")
+    if privacy_style in ["sample", "hybrid"]:
+        logger.info(
+            f"Sample-level DP (Opacus): ENABLED (multiplier={sample_noise_multiplier}, clip={sample_max_grad_norm})"
+        )
 
-        # PRE-COMPUTE optimal noise multiplier using Opacus
-        try:
-            client_dataset_size = int(config.get("privacy.client_dataset_size", 270))
-            computed_noise, projected_epsilon = validate_privacy_config(
-                config=config,
-                client_dataset_size=client_dataset_size,
-            )
-
-            # Override config value with pre-computed noise
-            logger.info(f"✓ Pre-computed noise_multiplier: {computed_noise:.4f}")
-            logger.info(f"✓ Projected final ε: {projected_epsilon:.4f}")
-
-            # Store for use in strategy
-            noise_multiplier = computed_noise
-
-        except ValueError as e:
-            logger.error(f"Privacy budget validation failed:\n{e}")
-            raise SystemExit(1)  # Abort immediately
+        # PRE-COMPUTE optimal noise multiplier using Opacus if not hybrid or special handling
+        # For now we use the provided noise_multiplier as base
+        noise_multiplier = sample_noise_multiplier
     else:
-        logger.warning("Differential Privacy: DISABLED")
-        noise_multiplier = 1.0  # Not used, but set for consistency
+        logger.info("Sample-level DP (Opacus): DISABLED")
+        noise_multiplier = 0.0
+
+    if privacy_style in ["user", "hybrid"]:
+        logger.info(
+            f"User-level DP (Server): ENABLED (multiplier={user_noise_multiplier}, clip={user_max_grad_norm})"
+        )
+    else:
+        logger.info("User-level DP (Server): DISABLED")
 
     # Get model configuration
     model_config = config.get_section("model")
@@ -187,14 +194,19 @@ def server_fn(context: fl.common.Context) -> ServerAppComponents:
 
     # Create strategy
     strategy = DPFedAvg(
-        target_epsilon=target_epsilon,
         target_delta=target_delta,
         run_dir=run_dir,
         run_name=run_name,
         save_metrics=save_metrics,
         num_rounds=num_rounds,
         noise_multiplier=noise_multiplier,
-        max_grad_norm=max_grad_norm,
+        max_grad_norm=sample_max_grad_norm,
+        user_noise_multiplier=user_noise_multiplier
+        if privacy_style in ["user", "hybrid"]
+        else 0.0,
+        user_max_grad_norm=user_max_grad_norm
+        if privacy_style in ["user", "hybrid"]
+        else 0.0,
         start_round=start_round,
         fraction_fit=fraction_fit,
         fraction_evaluate=fraction_evaluate,
@@ -204,7 +216,18 @@ def server_fn(context: fl.common.Context) -> ServerAppComponents:
         initial_parameters=initial_parameters,
         fit_metrics_aggregation_fn=weighted_average,
         evaluate_metrics_aggregation_fn=weighted_average,
+        total_clients=num_clients,
     )
+
+    # Wrap strategy with Flower's Server-Side DP if requested
+    if privacy_style in ["user", "hybrid"]:
+        strategy = fl.server.strategy.DifferentialPrivacyServerSideFixedClipping(
+            strategy,
+            noise_multiplier=user_noise_multiplier,
+            clipping_norm=user_max_grad_norm,
+            num_sampled_clients=min_fit_clients,
+        )
+        logger.info("✓ Wrapped strategy with Server-Side DP")
 
     # Flower runs server_round 1..N, so we run remaining_rounds
     server_config = ServerConfig(num_rounds=remaining_rounds)

@@ -22,14 +22,13 @@ Expected directory structure:
 from pathlib import Path
 from typing import Dict, List, Tuple, Union
 
-from monai.transforms import (
-    Compose,
+from monai.transforms.compose import Compose
+from monai.transforms.io.dictionary import LoadImaged
+from monai.transforms.intensity.dictionary import ScaleIntensityd
+from monai.transforms.spatial.dictionary import Resized, RandFlipd, RandRotate90d
+from monai.transforms.utility.dictionary import (
     EnsureChannelFirstd,
-    LoadImaged,
-    RandFlipd,
-    RandRotate90d,
-    Resized,
-    ScaleIntensityd,
+    EnsureTyped,
     ToTensord,
 )
 
@@ -135,6 +134,10 @@ def get_transforms(spatial_size: Tuple[int, int], is_train: bool = True) -> Comp
         transforms = base_transforms
 
     # Final conversion to tensors
+    # EnsureTyped converts MetaTensors to plain torch.Tensors for Opacus compatibility
+    # This prevents the "TypeError: zeros() received an invalid combination of arguments"
+    # when Opacus handles empty batches with Poisson sampling.
+    transforms.append(EnsureTyped(keys=["image", "label"], data_type="tensor"))
     transforms.append(ToTensord(keys=["image", "label"]))
 
     return Compose(transforms)

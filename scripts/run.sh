@@ -1,7 +1,19 @@
 #!/bin/bash
-# DP-FedMed run script with federation configuration
+# DP-FedMed run script for all DP styles
 
-flwr run . \
-  --federation-config 'options.num-supernodes=2' \
-  --federation-config 'options.backend.client-resources.num-cpus=1' \
-  --federation-config 'options.backend.client-resources.num-gpus=0.3'
+# Function to run simulation with a specific config
+run_sim() {
+  local config_file=$1
+  echo "=========================================================="
+  echo "Running simulation with: $config_file"
+  echo "=========================================================="
+
+  flwr run . \
+    --run-config "config-file=\"$config_file\""
+}
+
+# Run all 4 styles one by one
+run_sim "configs/none.toml"
+run_sim "configs/sample.toml"
+run_sim "configs/user.toml"
+run_sim "configs/default.toml" # Hybrid

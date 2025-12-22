@@ -118,7 +118,7 @@ def set_parameters(model: nn.Module, parameters: list) -> None:
     params_dict = zip(state_dict.keys(), parameters)
 
     # Build new state dict
-    new_state_dict = {k: torch.tensor(v) for k, v in params_dict}
+    new_state_dict = {k: torch.as_tensor(v).detach().clone() for k, v in params_dict}
 
     # Load into appropriate target
     if hasattr(model, "_module"):
