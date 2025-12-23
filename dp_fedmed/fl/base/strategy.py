@@ -1,11 +1,10 @@
-"""Abstract base class for DP-aware federated strategies.
+"""DP-aware federated strategy with configurable metrics.
 
-This module defines the BaseDPStrategy class that provides shared
-functionality for both supervised and SSL federated averaging strategies.
+This module defines the DPStrategy class that provides privacy accounting,
+checkpointing, and metric aggregation for federated learning.
 """
 
 import json
-from abc import ABC, abstractmethod
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -20,16 +19,22 @@ from dp_fedmed.privacy.accountant import PrivacyAccountant
 from dp_fedmed.fl.checkpoint import UnifiedCheckpointManager, ClientState
 
 
-class BaseDPStrategy(FedAvg, ABC):
-    """Abstract base class for DP-aware federated strategies.
+class DPStrategy(FedAvg):
+    """DP-aware federated averaging strategy with configurable metrics.
 
     This class provides shared functionality for privacy accounting,
-    checkpointing, and metric aggregation. Subclasses implement
-    the evaluation metric aggregation logic.
+    checkpointing, and metric aggregation. It supports both supervised
+    learning (dice metric) and SSL pretraining (val_loss metric).
+
+    Args:
+        primary_metric: Name of the primary evaluation metric (e.g., 'dice', 'val_loss')
+        higher_is_better: Whether higher metric values are better (True for dice, False for loss)
     """
 
     def __init__(
         self,
+        primary_metric: str = "dice",
+        higher_is_better: bool = True,
         target_delta: float = 1e-5,
         target_epsilon: Optional[float] = None,
         run_dir: Optional[Path] = None,
@@ -51,6 +56,8 @@ class BaseDPStrategy(FedAvg, ABC):
         """Initialize DP-aware strategy.
 
         Args:
+            primary_metric: Name of the primary evaluation metric
+            higher_is_better: Whether higher metric values are better
             target_delta: Target delta for DP
             target_epsilon: Target epsilon for DP (optional, for tracking)
             run_dir: Directory to save results
@@ -69,7 +76,9 @@ class BaseDPStrategy(FedAvg, ABC):
             is_mid_round_resume: Whether this is a mid-round resume
             **kwargs: Additional arguments for FedAvg
         """
-        # Filter out DPFedAvg/DPFedAvgSSL specific kwargs before passing to FedAvg
+        self.primary_metric = primary_metric
+        self.higher_is_better = higher_is_better
+        # Filter out strategy-specific kwargs before passing to FedAvg
         fedavg_kwargs = {
             k: v
             for k, v in kwargs.items()
@@ -143,22 +152,22 @@ class BaseDPStrategy(FedAvg, ABC):
             )
         logger.info(f"Results will be saved to: {self.run_dir.absolute()}")
 
-    @abstractmethod
     def _get_primary_metric_name(self) -> str:
         """Get the name of the primary evaluation metric.
 
         Returns:
-            Metric name (e.g., 'dice' for supervised, 'val_loss' for SSL)
+            Metric name configured at initialization
         """
-        pass
+        return self.primary_metric
 
-    @abstractmethod
     def _aggregate_evaluation_metrics(
         self,
         results: List[Tuple],
         metrics_aggregated: Dict[str, Scalar],
     ) -> Tuple[Optional[float], Dict[str, Scalar]]:
         """Aggregate evaluation metrics from client results.
+
+        Performs weighted average of the primary metric across all clients.
 
         Args:
             results: List of (client_proxy, eval_result) tuples
@@ -167,7 +176,42 @@ class BaseDPStrategy(FedAvg, ABC):
         Returns:
             Tuple of (weighted_metric_value, updated_metrics_dict)
         """
-        pass
+        metric_values = []
+        weights = []
+
+        for client_proxy, eval_res in results:
+            client_id = str(client_proxy.cid)
+            metrics = eval_res.metrics or {}
+
+            # Extract the primary metric value
+            metric_val = float(metrics.get(self.primary_metric, 0.0))
+            eval_loss = float(metrics.get("loss", 0.0))
+
+            metric_values.append(metric_val)
+            weights.append(eval_res.num_examples)
+
+            # Update client's last round entry with eval metrics
+            server_round = self.current_round
+            client_found = False
+            for entry in reversed(self.client_metrics[client_id]):
+                if entry["round"] == server_round:
+                    entry[self.primary_metric] = metric_val
+                    entry["eval_loss"] = eval_loss
+                    client_found = True
+                    break
+            if not client_found:
+                logger.warning(
+                    f"Round {server_round} not found in client_metrics for client {client_id}"
+                )
+
+        if metric_values:
+            weighted_metric = sum(
+                val * weight for val, weight in zip(metric_values, weights)
+            ) / sum(weights)
+            metrics_aggregated[self.primary_metric] = float(weighted_metric)
+            return weighted_metric, metrics_aggregated
+
+        return None, metrics_aggregated
 
     def initialize_checkpoint(self, parameters: Parameters) -> None:
         """Initialize checkpoint for a fresh run.

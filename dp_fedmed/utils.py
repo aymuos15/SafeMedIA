@@ -14,6 +14,18 @@ import torch.nn as nn
 from loguru import logger
 
 
+def is_loss_valid(loss: torch.Tensor) -> bool:
+    """Check if loss tensor is finite and valid for backpropagation.
+
+    Args:
+        loss: Loss tensor to validate
+
+    Returns:
+        True if loss is finite, False otherwise
+    """
+    return bool(torch.all(torch.isfinite(loss)).item())
+
+
 def get_unwrapped_model(model: nn.Module) -> nn.Module:
     """Get the base model, handling Opacus wrapping.
 

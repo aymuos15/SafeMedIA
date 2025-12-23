@@ -22,7 +22,7 @@ from dp_fedmed.fl.checkpoint import (
     UnifiedCheckpointManager,
     ClientState,
 )
-from dp_fedmed.fl.ssl.strategy import DPFedAvgSSL
+from dp_fedmed.fl.base.strategy import DPStrategy
 from dp_fedmed.fl.ssl.model import SSLUNet
 from dp_fedmed.fl.server.aggregation import weighted_average
 
@@ -215,7 +215,9 @@ def server_fn(context: fl.common.Context) -> ServerAppComponents:
         )
 
     # Create strategy
-    strategy = DPFedAvgSSL(
+    strategy = DPStrategy(
+        primary_metric="val_loss",
+        higher_is_better=False,
         target_delta=target_delta,
         run_dir=run_dir,
         run_name=run_name,

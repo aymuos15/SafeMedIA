@@ -1,20 +1,20 @@
-"""Tests for DPFedAvg strategy and server-side aggregation."""
+"""Tests for DPStrategy and server-side aggregation."""
 
 import json
 from typing import Any, cast
 import numpy as np
 from unittest.mock import MagicMock, patch
 
-from dp_fedmed.fl.server.strategy import DPFedAvg
+from dp_fedmed.fl.base.strategy import DPStrategy
 from dp_fedmed.fl.checkpoint import UnifiedCheckpointManager
 
 
-class TestDPFedAvgInitialization:
-    """Tests for DPFedAvg initialization."""
+class TestDPStrategyInitialization:
+    """Tests for DPStrategy initialization."""
 
     def test_default_initialization(self, tmp_path):
-        """Test DPFedAvg initialization with defaults."""
-        strategy = DPFedAvg(
+        """Test DPStrategy initialization with defaults."""
+        strategy = DPStrategy(
             target_delta=1e-5,
             run_dir=tmp_path / "results",
             run_name="test",
@@ -27,8 +27,8 @@ class TestDPFedAvgInitialization:
         assert not strategy.is_mid_round_resume
 
     def test_initialization_with_custom_params(self, tmp_path):
-        """Test DPFedAvg initialization with custom parameters."""
-        strategy = DPFedAvg(
+        """Test DPStrategy initialization with custom parameters."""
+        strategy = DPStrategy(
             target_delta=1e-6,
             run_dir=tmp_path / "results",
             run_name="custom",
@@ -51,7 +51,7 @@ class TestDPFedAvgInitialization:
         assert strategy.local_epochs == 10
 
     def test_initialization_with_checkpoint_manager(self, tmp_path):
-        """Test DPFedAvg initialization with external checkpoint manager."""
+        """Test DPStrategy initialization with external checkpoint manager."""
         checkpoint_dir = tmp_path / "checkpoints"
         checkpoint_dir.mkdir(parents=True)
 
@@ -62,7 +62,7 @@ class TestDPFedAvgInitialization:
             target_delta=1e-5,
         )
 
-        strategy = DPFedAvg(
+        strategy = DPStrategy(
             run_dir=tmp_path / "results",
             run_name="test",
             checkpoint_manager=checkpoint_manager,
@@ -71,10 +71,10 @@ class TestDPFedAvgInitialization:
         assert strategy.checkpoint_manager is checkpoint_manager
 
     def test_mid_round_resume_initialization(self, tmp_path):
-        """Test DPFedAvg initialization for mid-round resume."""
+        """Test DPStrategy initialization for mid-round resume."""
         client_states = {0: MagicMock(), 1: MagicMock()}
 
-        strategy = DPFedAvg(
+        strategy = DPStrategy(
             run_dir=tmp_path / "results",
             run_name="test",
             start_round=5,
@@ -87,12 +87,12 @@ class TestDPFedAvgInitialization:
         assert len(strategy.client_resume_states) == 2
 
 
-class TestDPFedAvgAggregateFit:
+class TestDPStrategyAggregateFit:
     """Tests for aggregate_fit method."""
 
     def test_aggregate_fit_empty_results(self, tmp_path):
         """Test aggregate_fit with empty results returns None."""
-        strategy = DPFedAvg(
+        strategy = DPStrategy(
             run_dir=tmp_path / "results",
             run_name="test",
         )
@@ -108,7 +108,7 @@ class TestDPFedAvgAggregateFit:
 
     def test_aggregate_fit_records_privacy(self, tmp_path):
         """Test aggregate_fit records privacy metrics correctly."""
-        strategy = DPFedAvg(
+        strategy = DPStrategy(
             run_dir=tmp_path / "results",
             run_name="test",
             noise_multiplier=1.0,
@@ -175,7 +175,7 @@ class TestDPFedAvgAggregateFit:
 
     def test_aggregate_fit_stores_server_round_data(self, tmp_path):
         """Test aggregate_fit stores server round data."""
-        strategy = DPFedAvg(
+        strategy = DPStrategy(
             run_dir=tmp_path / "results",
             run_name="test",
         )
@@ -203,12 +203,12 @@ class TestDPFedAvgAggregateFit:
         assert strategy.server_rounds[0]["num_clients"] == 1
 
 
-class TestDPFedAvgAggregateEvaluate:
+class TestDPStrategyAggregateEvaluate:
     """Tests for aggregate_evaluate method."""
 
     def test_aggregate_evaluate_empty_results(self, tmp_path):
         """Test aggregate_evaluate with empty results."""
-        strategy = DPFedAvg(
+        strategy = DPStrategy(
             run_dir=tmp_path / "results",
             run_name="test",
         )
@@ -224,7 +224,7 @@ class TestDPFedAvgAggregateEvaluate:
 
     def test_aggregate_evaluate_computes_weighted_dice(self, tmp_path):
         """Test aggregate_evaluate computes weighted dice correctly."""
-        strategy = DPFedAvg(
+        strategy = DPStrategy(
             run_dir=tmp_path / "results",
             run_name="test",
         )
@@ -268,12 +268,12 @@ class TestDPFedAvgAggregateEvaluate:
         assert abs(dice - 0.85) < 1e-6
 
 
-class TestDPFedAvgCheckpointing:
+class TestDPStrategyCheckpointing:
     """Tests for checkpoint saving functionality."""
 
     def test_save_checkpoints_no_parameters(self, tmp_path):
         """Test _save_checkpoints returns False when no parameters."""
-        strategy = DPFedAvg(
+        strategy = DPStrategy(
             run_dir=tmp_path / "results",
             run_name="test",
         )
@@ -288,7 +288,7 @@ class TestDPFedAvgCheckpointing:
         checkpoint_dir = tmp_path / "checkpoints"
         checkpoint_dir.mkdir(parents=True)
 
-        strategy = DPFedAvg(
+        strategy = DPStrategy(
             run_dir=tmp_path / "results",
             run_name="test",
         )
@@ -312,12 +312,12 @@ class TestDPFedAvgCheckpointing:
         assert result is True
 
 
-class TestDPFedAvgPrivacyIntegration:
+class TestDPStrategyPrivacyIntegration:
     """Tests for privacy accountant integration."""
 
     def test_privacy_accountant_accumulates_across_rounds(self, tmp_path):
         """Test that privacy accountant accumulates epsilon across rounds."""
-        strategy = DPFedAvg(
+        strategy = DPStrategy(
             run_dir=tmp_path / "results",
             run_name="test",
             noise_multiplier=1.0,
@@ -357,12 +357,12 @@ class TestDPFedAvgPrivacyIntegration:
             assert epsilons[i] >= epsilons[i - 1]
 
 
-class TestDPFedAvgConfigureFit:
+class TestDPStrategyConfigureFit:
     """Tests for configure_fit method."""
 
     def test_configure_fit_includes_noise_multiplier(self, tmp_path):
         """Test configure_fit includes noise_multiplier in config."""
-        strategy = DPFedAvg(
+        strategy = DPStrategy(
             run_dir=tmp_path / "results",
             run_name="test",
             noise_multiplier=2.5,
@@ -393,7 +393,7 @@ class TestDPFedAvgConfigureFit:
         checkpoint_dir = tmp_path / "checkpoints"
         checkpoint_dir.mkdir(parents=True)
 
-        strategy = DPFedAvg(
+        strategy = DPStrategy(
             run_dir=tmp_path / "results",
             run_name="test",
             start_round=3,
@@ -419,7 +419,7 @@ class TestDPFedAvgConfigureFit:
         assert fit_ins.config["resume_from_checkpoint"] is True
 
 
-class TestDPFedAvgSaveLogs:
+class TestDPStrategySaveLogs:
     """Tests for save_logs functionality."""
 
     def test_save_logs_creates_files(self, tmp_path):
@@ -427,7 +427,7 @@ class TestDPFedAvgSaveLogs:
         run_dir = tmp_path / "results"
         run_dir.mkdir(parents=True)
 
-        strategy = DPFedAvg(
+        strategy = DPStrategy(
             run_dir=run_dir,
             run_name="test",
             num_rounds=5,
@@ -469,7 +469,7 @@ class TestDPFedAvgSaveLogs:
         run_dir = tmp_path / "results"
         run_dir.mkdir(parents=True)
 
-        strategy = DPFedAvg(
+        strategy = DPStrategy(
             run_dir=run_dir,
             run_name="test",
             save_metrics=False,

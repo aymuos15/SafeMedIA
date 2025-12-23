@@ -21,7 +21,7 @@ from ..checkpoint import (
     UnifiedCheckpointManager,
     ClientState,
 )
-from .strategy import DPFedAvg
+from ..base.strategy import DPStrategy
 from .aggregation import weighted_average
 
 
@@ -209,7 +209,9 @@ def server_fn(context: fl.common.Context) -> ServerAppComponents:
         )
 
     # Create strategy
-    strategy = DPFedAvg(
+    strategy = DPStrategy(
+        primary_metric="dice",
+        higher_is_better=True,
         target_delta=target_delta,
         run_dir=run_dir,
         run_name=run_name,

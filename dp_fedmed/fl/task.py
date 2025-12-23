@@ -23,7 +23,7 @@ from monai.metrics.meandice import DiceMetric
 from loguru import logger
 
 from dp_fedmed.losses.dice import get_loss_function
-from dp_fedmed.utils import extract_batch_data
+from dp_fedmed.utils import extract_batch_data, is_loss_valid
 
 
 def train_one_epoch(
@@ -70,7 +70,7 @@ def train_one_epoch(
         outputs = model(images)
         loss = criterion(outputs, labels)
 
-        if not torch.isfinite(loss):
+        if not is_loss_valid(loss):
             logger.warning(f"Non-finite loss detected: {loss.item()}, skipping batch")
             continue
 

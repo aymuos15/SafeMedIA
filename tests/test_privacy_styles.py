@@ -6,17 +6,17 @@ import flwr as fl
 from dp_fedmed.config import (
     DPStyle,
 )
-from dp_fedmed.fl.server.strategy import DPFedAvg
+from dp_fedmed.fl.base.strategy import DPStrategy
 from dp_fedmed.fl.server.factory import server_fn
 from dp_fedmed.fl.client.dp_client import DPFlowerClient
 
 
 def test_strategy_initialization_with_different_styles(tmp_path):
-    """Test that DPFedAvg can be initialized with different privacy styles."""
+    """Test that DPStrategy can be initialized with different privacy styles."""
     run_dir = tmp_path / "run"
 
     # Test None style
-    strategy = DPFedAvg(
+    strategy = DPStrategy(
         target_delta=1e-5,
         run_dir=run_dir,
         num_rounds=1,
@@ -76,7 +76,7 @@ max_grad_norm = 0.1
         node_config={},
     )
     components_none = server_fn(context_none)
-    assert isinstance(components_none.strategy, DPFedAvg)
+    assert isinstance(components_none.strategy, DPStrategy)
 
     # Test "user" style - SHOULD be wrapped
     config_user = create_test_config("user")

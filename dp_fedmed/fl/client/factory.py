@@ -29,6 +29,32 @@ class TrainingMode(Enum):
     SSL = "ssl"
 
 
+def _partition_data(
+    full_data: list,
+    partition_id: int,
+    num_partitions: int,
+) -> list:
+    """Partition data for a specific client.
+
+    Args:
+        full_data: Complete dataset
+        partition_id: Client partition ID (0-indexed)
+        num_partitions: Total number of partitions
+
+    Returns:
+        Subset of data for this client
+    """
+    total_samples = len(full_data)
+    samples_per_client = total_samples // num_partitions
+    start_idx = partition_id * samples_per_client
+    end_idx = (
+        start_idx + samples_per_client
+        if partition_id < num_partitions - 1
+        else total_samples
+    )
+    return [full_data[i] for i in range(start_idx, end_idx)]
+
+
 def create_client_fn(
     config_file: str = "configs/default.toml",
     mode: TrainingMode = TrainingMode.SUPERVISED,
@@ -161,20 +187,10 @@ def _create_supervised_client(
     test_data = build_data_list(data_dir, "test")
 
     # Partition training data for this client
-    total_samples = len(full_train_data)
-    samples_per_client = total_samples // num_partitions
-    start_idx = partition_id * samples_per_client
-    end_idx = (
-        start_idx + samples_per_client
-        if partition_id < num_partitions - 1
-        else total_samples
+    client_train_data = _partition_data(full_train_data, partition_id, num_partitions)
+    logger.info(
+        f"Client {partition_id} data: {len(client_train_data)} training samples"
     )
-
-    # Create subset for this client
-    train_indices = list(range(start_idx, end_idx))
-    client_train_data = [full_train_data[i] for i in train_indices]
-
-    logger.info(f"Client {partition_id} data: {len(train_indices)} training samples")
 
     # Create datasets with transforms
     train_transforms = get_transforms((image_size, image_size), is_train=True)
@@ -293,29 +309,14 @@ def _create_ssl_client(
     full_train_data = build_data_list(data_dir, "train")
     logger.info(f"Total unlabeled images: {len(full_train_data)}")
 
-    # Support limiting samples for testing
-    max_samples_per_client = int(config.get("data.max_samples_per_client", 0))
-
     # Partition training data for this client
-    total_samples = len(full_train_data)
-    samples_per_client = total_samples // num_partitions
-    start_idx = partition_id * samples_per_client
-    end_idx = (
-        start_idx + samples_per_client
-        if partition_id < num_partitions - 1
-        else total_samples
-    )
-
-    # Create subset for this client
-    train_indices = list(range(start_idx, end_idx))
-    client_train_data = [full_train_data[i] for i in train_indices]
+    client_train_data = _partition_data(full_train_data, partition_id, num_partitions)
 
     # Optionally limit samples (for testing)
+    max_samples_per_client = int(config.get("data.max_samples_per_client", 0))
     if max_samples_per_client > 0:
         client_train_data = client_train_data[:max_samples_per_client]
-        logger.info(
-            f"Limited to {max_samples_per_client} samples per client (for testing)"
-        )
+        logger.info(f"Limited to {max_samples_per_client} samples (for testing)")
 
     logger.info(f"Client {partition_id} assigned {len(client_train_data)} images")
 

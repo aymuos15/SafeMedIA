@@ -14,7 +14,7 @@ from unittest.mock import MagicMock
 
 from dp_fedmed.fl.ssl.config import SSLConfig, AugmentationConfig
 from dp_fedmed.fl.ssl.client import SSLUNet
-from dp_fedmed.fl.ssl.strategy import DPFedAvgSSL
+from dp_fedmed.fl.base.strategy import DPStrategy
 from dp_fedmed.fl.ssl.transforms import get_ssl_transform
 from dp_fedmed.models.unet2d import create_unet2d
 
@@ -94,28 +94,35 @@ class TestFederatedSSLClientFactory:
 class TestFederatedSSLStrategy:
     """Test federated SSL strategy with privacy accounting."""
 
-    def test_dp_fed_avg_ssl_creation(self):
-        """Test creating DPFedAvgSSL strategy."""
-        strategy = DPFedAvgSSL(
+    def test_dp_strategy_ssl_creation(self, tmp_path):
+        """Test creating DPStrategy for SSL."""
+        strategy = DPStrategy(
+            primary_metric="val_loss",
+            higher_is_better=False,
             fraction_fit=1.0,
             min_fit_clients=2,
             target_epsilon=8.0,
             target_delta=1e-5,
-            privacy_style="sample",
             noise_multiplier=1.0,
+            run_dir=tmp_path / "results",
+            run_name="test_ssl",
         )
         assert strategy is not None
-        assert hasattr(strategy, "target_epsilon")
+        assert strategy.primary_metric == "val_loss"
+        assert strategy.target_epsilon == 8.0
 
-    def test_privacy_budget_computation(self):
+    def test_privacy_budget_computation(self, tmp_path):
         """Test privacy budget computation across rounds."""
-        strategy = DPFedAvgSSL(
+        strategy = DPStrategy(
+            primary_metric="val_loss",
+            higher_is_better=False,
             fraction_fit=1.0,
             min_fit_clients=2,
             target_epsilon=8.0,
             target_delta=1e-5,
-            privacy_style="sample",
             noise_multiplier=1.0,
+            run_dir=tmp_path / "results",
+            run_name="test_ssl",
         )
 
         # Verify strategy has privacy accounting

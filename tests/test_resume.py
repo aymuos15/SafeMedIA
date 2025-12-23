@@ -17,7 +17,7 @@ from dp_fedmed.fl.checkpoint import (
     resolve_checkpoint_path,
     save_unified_checkpoint,
 )
-from dp_fedmed.fl.server.strategy import DPFedAvg
+from dp_fedmed.fl.base.strategy import DPStrategy
 from dp_fedmed.models.unet2d import create_unet2d, get_parameters
 
 
@@ -26,7 +26,7 @@ class TestCheckpointMetadata:
 
     @pytest.fixture
     def dummy_strategy(self, tmp_path):
-        """Create a DPFedAvg strategy for testing."""
+        """Create a DPStrategy strategy for testing."""
         checkpoint_dir = tmp_path / "checkpoints"
         checkpoint_manager = UnifiedCheckpointManager(
             checkpoint_dir=checkpoint_dir,
@@ -34,7 +34,7 @@ class TestCheckpointMetadata:
             num_rounds=10,
             target_delta=1e-5,
         )
-        return DPFedAvg(
+        return DPStrategy(
             target_delta=1e-5,
             run_dir=tmp_path / "server",
             run_name="test",
@@ -185,7 +185,7 @@ class TestStartRoundOffset:
 
     def test_configure_fit_uses_actual_round(self):
         """Test that configure_fit uses actual round when resuming."""
-        strategy = DPFedAvg(
+        strategy = DPStrategy(
             target_delta=1e-5,
             start_round=4,  # Resuming from round 4
             num_rounds=10,
@@ -217,7 +217,7 @@ class TestStartRoundOffset:
 
     def test_configure_fit_includes_local_epochs(self):
         """Test that configure_fit includes local_epochs in config."""
-        strategy = DPFedAvg(
+        strategy = DPStrategy(
             target_delta=1e-5,
             num_rounds=10,
             noise_multiplier=1.0,
@@ -242,7 +242,7 @@ class TestStartRoundOffset:
 
     def test_mid_round_resume_signals_clients(self):
         """Test that mid-round resume sends signal to clients."""
-        strategy = DPFedAvg(
+        strategy = DPStrategy(
             target_delta=1e-5,
             start_round=4,
             num_rounds=10,
@@ -271,7 +271,7 @@ class TestStartRoundOffset:
 
     def test_fresh_start_has_start_round_one(self):
         """Test that fresh start has start_round=1."""
-        strategy = DPFedAvg(
+        strategy = DPStrategy(
             target_delta=1e-5,
             num_rounds=10,
             noise_multiplier=1.0,

@@ -7,6 +7,8 @@ import torch.nn as nn
 import torch.utils.data
 from loguru import logger
 
+from dp_fedmed.utils import is_loss_valid
+
 
 def train_epoch_ssl(
     model: nn.Module,
@@ -58,7 +60,7 @@ def train_epoch_ssl(
         loss = criterion(z1, z2)
         loss = loss.mean()
 
-        if not torch.all(torch.isfinite(loss)):
+        if not is_loss_valid(loss):
             logger.warning(
                 f"Non-finite loss detected: {loss.item() if loss.numel() == 1 else 'multiple'}, skipping batch"
             )
@@ -120,7 +122,7 @@ def validate_ssl(
             # Compute contrastive loss
             loss = criterion(z1, z2)
 
-            if torch.all(torch.isfinite(loss)):
+            if is_loss_valid(loss):
                 total_loss += loss.mean().item()
                 num_batches += 1
 
