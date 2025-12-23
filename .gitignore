@@ -123,3 +123,6 @@ Thumbs.db
 
 # Idea
 idea.md
+
+# MkDocs build output
+site/
