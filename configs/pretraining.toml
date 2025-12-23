@@ -1,0 +1,96 @@
+# Federated Self-Supervised Learning (SSL) Pretraining Configuration
+# This configuration defines FEDERATED-ONLY SSL pretraining for DP-FedMed.
+
+[data]
+# Path to dataset in nnUNet format (imagesTr/, labelsTr/, etc.)
+data_dir = "/home/localssk23/CAI4Soumya/SegData/nnUNet_raw/Dataset001_Cellpose"
+# Target image size for SSL training (single int - will be used as square)
+image_size = 224
+# Batch size for training
+batch_size = 2
+# Number of workers for data loading
+num_workers = 4
+
+[model]
+# UNet model configuration (used as backbone for SSL)
+in_channels = 1
+out_channels = 2
+channels = [16, 32, 64, 128]
+strides = [2, 2, 2]
+num_res_units = 2
+dropout = 0.0
+
+[training]
+# Training hyperparameters (mapped to ssl.epochs for SSL)
+local_epochs = 2
+learning_rate = 0.001
+optimizer = "sgd"
+momentum = 0.9
+
+[ssl]
+# SSL-specific settings
+method = "simclr"
+epochs = 2
+batch_size = 2
+learning_rate = 0.001
+weight_decay = 1e-4
+momentum = 0.9
+temperature = 0.07
+projection_dim = 128
+hidden_dim = 256
+device = "cuda"
+
+[augmentation]
+# Image augmentation parameters for SSL (medical image-friendly)
+gaussian_blur = true
+gaussian_blur_prob = 0.5
+color_jitter_prob = 0.2
+color_jitter_strength = 0.3
+rotation_prob = 0.5
+rotation_degrees = 30
+flip_prob = 0.5
+crop_min_scale = 0.8
+crop_max_scale = 1.0
+normalize_mean = [0.5]
+normalize_std = [0.5]
+input_size = [224, 224]
+
+[federated]
+# Federated learning parameters
+num_clients = 2
+num_rounds = 2
+fraction_fit = 1.0
+fraction_evaluate = 1.0
+min_fit_clients = 2
+min_evaluate_clients = 2
+min_available_clients = 2
+
+[client_resources]
+num_cpus = 1
+num_gpus = 0.3
+
+[privacy]
+# Privacy style: "none", "sample", "user", "hybrid"
+style = "sample"
+target_delta = 1e-5
+
+[privacy.sample]
+# Sample-level DP: Clipping per sample, noise per batch
+noise_multiplier = 1.0
+max_grad_norm = 1.0
+
+[privacy.user]
+# User-level DP: Per-user clipping and noise aggregation
+# Note: must be > 0 per schema, set to small value when not used
+noise_multiplier = 0.001
+max_grad_norm = 1.0
+
+[checkpointing]
+enabled = true
+checkpoint_dir = "checkpoints"
+# resume_from = "last"  # Uncomment to resume
+
+[logging]
+save_model = true
+save_metrics = true
+level = "INFO"

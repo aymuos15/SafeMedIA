@@ -151,10 +151,9 @@ class TestDPFedAvgAggregateFit:
             (mock_client2, mock_fit_res2),
         ]
 
-        # Mock the parent aggregate_fit
-        with patch.object(
-            DPFedAvg.__bases__[0],
-            "aggregate_fit",
+        # Mock the parent aggregate_fit (FedAvg)
+        with patch(
+            "flwr.server.strategy.FedAvg.aggregate_fit",
             return_value=(MagicMock(), {}),
         ):
             params, metrics = strategy.aggregate_fit(
@@ -192,9 +191,9 @@ class TestDPFedAvgAggregateFit:
 
         results = [(mock_client, mock_fit_res)]
 
-        with patch.object(
-            DPFedAvg.__bases__[0],
-            "aggregate_fit",
+        # Mock the parent aggregate_fit (FedAvg)
+        with patch(
+            "flwr.server.strategy.FedAvg.aggregate_fit",
             return_value=(MagicMock(), {}),
         ):
             strategy.aggregate_fit(server_round=1, results=results, failures=[])
@@ -254,9 +253,8 @@ class TestDPFedAvgAggregateEvaluate:
             (mock_client2, mock_eval_res2),
         ]
 
-        with patch.object(
-            DPFedAvg.__bases__[0],
-            "aggregate_evaluate",
+        with patch(
+            "flwr.server.strategy.FedAvg.aggregate_evaluate",
             return_value=(0.25, {}),
         ):
             loss, metrics = strategy.aggregate_evaluate(
@@ -281,7 +279,7 @@ class TestDPFedAvgCheckpointing:
         )
 
         # latest_parameters is None by default
-        result = strategy._save_checkpoints(current_dice=0.8)
+        result = strategy._save_checkpoints(current_metric=0.8)
 
         assert result is False
 
@@ -309,7 +307,7 @@ class TestDPFedAvgCheckpointing:
         strategy.latest_parameters = ndarrays_to_parameters(params)
         strategy.current_round = 1
 
-        result = strategy._save_checkpoints(current_dice=0.8)
+        result = strategy._save_checkpoints(current_metric=0.8)
 
         assert result is True
 
@@ -344,9 +342,8 @@ class TestDPFedAvgPrivacyIntegration:
 
             results = [(mock_client, mock_fit_res)]
 
-            with patch.object(
-                DPFedAvg.__bases__[0],
-                "aggregate_fit",
+            with patch(
+                "flwr.server.strategy.FedAvg.aggregate_fit",
                 return_value=(MagicMock(), {}),
             ):
                 _, metrics = strategy.aggregate_fit(

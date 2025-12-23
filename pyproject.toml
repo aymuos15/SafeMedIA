@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "dp-fedmed"
-version = "0.1.0"
-description = "Differential Privacy + Federated Learning for Medical Imaging (Flower + Opacus + MONAI)"
+version = "0.2.0"
+description = "Differential Privacy + Federated Learning for Medical Imaging with SSL Pretraining (Flower + Opacus + MONAI + LightlySSL)"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
@@ -24,6 +24,7 @@ dependencies = [
     "tomli",
     "loguru>=0.7.0",
     "pydantic>=2.0.0",
+    "lightly>=1.5.22",
 ]
 
 [project.optional-dependencies]
@@ -50,6 +51,9 @@ docs = [
 [tool.hatch.build.targets.wheel]
 packages = ["dp_fedmed"]
 
+# ============================================================================
+# DEFAULT APP: Downstream Federated Learning (use: flwr run .)
+# ============================================================================
 [tool.flwr.app]
 publisher = "dp-fedmed"
 
@@ -60,12 +64,26 @@ clientapp = "dp_fedmed.fl.client.app:app"
 [tool.flwr.app.config]
 config-file = "configs/default.toml"
 
+# ============================================================================
+# SSL PRETRAINING: Use the script instead
+#   python scripts/run_ssl_pretraining.py configs/pretraining.toml
+# ============================================================================
+
+# ============================================================================
+# FEDERATION CONFIGURATIONS
+# ============================================================================
 [tool.flwr.federations]
 default = "local-simulation"
 
 [tool.flwr.federations.local-simulation]
 options.num-supernodes = 2
 options.backend.client-resources.num-cpus = 1
+options.backend.client-resources.num-gpus = 0.3
+options.backend.init-args.include_dashboard = false
+
+[tool.flwr.federations.ssl-simulation]
+options.num-supernodes = 2
+options.backend.client-resources.num-cpus = 2
 options.backend.client-resources.num-gpus = 0.3
 options.backend.init-args.include_dashboard = false
 

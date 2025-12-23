@@ -4,7 +4,10 @@ This module contains common utility functions used across the codebase
 to reduce redundancy and improve maintainability.
 """
 
-from typing import Optional, Tuple
+import json
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -79,3 +82,95 @@ def get_dataset_size(dataloader: torch.utils.data.DataLoader) -> int:
         return len(dataloader.dataset)  # type: ignore
     except (TypeError, AttributeError):
         return 0
+
+
+def load_client_history(run_dir: Path | None) -> List[Dict[str, Any]]:
+    """Load client history from disk.
+
+    Args:
+        run_dir: Directory where history is saved
+
+    Returns:
+        List of round history dictionaries
+    """
+    if run_dir:
+        history_path = run_dir / "history.json"
+        if history_path.exists():
+            try:
+                with open(history_path, "r") as f:
+                    data = json.load(f)
+                    return data.get("rounds", [])
+            except FileNotFoundError:
+                logger.debug("No history file found")
+            except json.JSONDecodeError as e:
+                logger.warning(f"Corrupted history file, starting fresh: {e}")
+            except Exception as e:
+                logger.error(f"Unexpected error loading history: {e}")
+    return []
+
+
+def save_client_metrics(
+    run_dir: Path | None,
+    client_id: int,
+    start_time: str,
+    round_history: List[Dict[str, Any]],
+    train_loader: torch.utils.data.DataLoader,
+    privacy_config: Dict[str, Any],
+    extra_metrics: Dict[str, Any] | None = None,
+) -> None:
+    """Save client-specific metrics and history.
+
+    Args:
+        run_dir: Directory to save metrics
+        client_id: Client partition ID
+        start_time: Training start time ISO string
+        round_history: List of round history
+        train_loader: Training data loader
+        privacy_config: Privacy configuration
+        extra_metrics: Additional metrics to include in final summary
+    """
+    if run_dir is None:
+        return
+
+    end_time = datetime.now().isoformat()
+
+    # Calculate final metrics from history
+    final_train_loss = 0.0
+    total_epsilon = 0.0
+
+    if round_history:
+        last_round = round_history[-1]
+        final_train_loss = last_round.get("train_loss", 0.0)
+        total_epsilon = sum(r.get("epsilon", 0.0) for r in round_history)
+
+    num_total_samples = get_dataset_size(train_loader)
+
+    # Save metrics.json
+    metrics_data = {
+        "client_id": client_id,
+        "start_time": start_time,
+        "end_time": end_time,
+        "num_rounds": len(round_history),
+        "final_train_loss": final_train_loss,
+        "training_samples": num_total_samples,
+        "privacy": {
+            "total_epsilon": total_epsilon,
+            "delta": privacy_config.get("target_delta", 1e-5),
+        },
+    }
+
+    if extra_metrics:
+        metrics_data.update(extra_metrics)
+
+    metrics_path = run_dir / "metrics.json"
+    with open(metrics_path, "w") as f:
+        json.dump(metrics_data, f, indent=2)
+
+    # Save history.json
+    history_data = {"client_id": client_id, "rounds": round_history}
+
+    history_path = run_dir / "history.json"
+    with open(history_path, "w") as f:
+        json.dump(history_data, f, indent=2)
+
+    logger.debug(f"✓ Client {client_id} metrics saved to {run_dir}")

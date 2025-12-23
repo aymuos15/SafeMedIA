@@ -66,7 +66,7 @@ class TestCheckpointMetadata:
         dummy_strategy.initialize_checkpoint(dummy_strategy.latest_parameters)
 
         # Save checkpoint
-        dummy_strategy._save_checkpoints(current_dice=0.75)
+        dummy_strategy._save_checkpoints(0.75)
 
         # Load and verify
         checkpoint_path = tmp_path / "checkpoints" / "last.pt"
@@ -104,7 +104,7 @@ class TestCheckpointMetadata:
 
         # Initialize and save checkpoint
         dummy_strategy.initialize_checkpoint(dummy_strategy.latest_parameters)
-        dummy_strategy._save_checkpoints(current_dice=0.75)
+        dummy_strategy._save_checkpoints(0.75)
 
         # Load and verify
         checkpoint_path = tmp_path / "checkpoints" / "last.pt"

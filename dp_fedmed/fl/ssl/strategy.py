@@ -1,7 +1,7 @@
-"""FedAvg strategy with privacy budget tracking for supervised learning.
+"""FedAvg strategy with privacy budget tracking for SSL pretraining.
 
-This module defines the DPFedAvg strategy that extends BaseDPStrategy
-for supervised segmentation with Dice metric aggregation.
+This module defines the DPFedAvgSSL strategy that extends BaseDPStrategy
+for self-supervised learning with validation loss aggregation.
 """
 
 from typing import Dict, List, Optional, Tuple
@@ -12,47 +12,45 @@ from loguru import logger
 from dp_fedmed.fl.base.strategy import BaseDPStrategy
 
 
-class DPFedAvg(BaseDPStrategy):
-    """FedAvg strategy with privacy tracking for supervised learning.
+class DPFedAvgSSL(BaseDPStrategy):
+    """FedAvg strategy with privacy tracking for SSL pretraining.
 
-    This strategy extends BaseDPStrategy with supervised learning specifics:
-    - Dice metric aggregation
-    - Segmentation-focused logging
+    This strategy extends BaseDPStrategy with SSL-specific functionality:
+    - Validation loss aggregation
+    - SSL-focused logging
     """
 
     def _get_primary_metric_name(self) -> str:
         """Get the primary evaluation metric name.
 
         Returns:
-            'dice' for supervised segmentation
+            'val_loss' for SSL pretraining
         """
-        return "dice"
+        return "val_loss"
 
     def _aggregate_evaluation_metrics(
         self,
         results: List[Tuple],
         metrics_aggregated: Dict[str, Scalar],
     ) -> Tuple[Optional[float], Dict[str, Scalar]]:
-        """Aggregate Dice metrics from client evaluation results.
+        """Aggregate validation loss from client evaluation results.
 
         Args:
             results: List of (client_proxy, eval_result) tuples
             metrics_aggregated: Pre-aggregated metrics from parent class
 
         Returns:
-            Tuple of (weighted_dice, updated_metrics_dict)
+            Tuple of (weighted_val_loss, updated_metrics_dict)
         """
-        dice_values = []
+        loss_values = []
         weights = []
 
         for client_proxy, eval_res in results:
             client_id = str(client_proxy.cid)
             metrics = eval_res.metrics or {}
 
-            dice = float(metrics.get("dice", 0.0))
-            eval_loss = float(metrics.get("loss", 0.0))
-
-            dice_values.append(dice)
+            val_loss = float(metrics.get("val_loss", 0.0))
+            loss_values.append(val_loss)
             weights.append(eval_res.num_examples)
 
             # Update client's last round entry with eval metrics
@@ -60,8 +58,7 @@ class DPFedAvg(BaseDPStrategy):
             client_found = False
             for entry in reversed(self.client_metrics[client_id]):
                 if entry["round"] == server_round:
-                    entry["dice"] = dice
-                    entry["eval_loss"] = eval_loss
+                    entry["val_loss"] = val_loss
                     client_found = True
                     break
             if not client_found:
@@ -69,11 +66,11 @@ class DPFedAvg(BaseDPStrategy):
                     f"Round {server_round} not found in client_metrics for client {client_id}"
                 )
 
-        if dice_values:
-            weighted_dice = sum(d * w for d, w in zip(dice_values, weights)) / sum(
-                weights
-            )
-            metrics_aggregated["dice"] = float(weighted_dice)
-            return weighted_dice, metrics_aggregated
+        if loss_values:
+            weighted_loss = sum(
+                loss * weight for loss, weight in zip(loss_values, weights)
+            ) / sum(weights)
+            metrics_aggregated["val_loss"] = float(weighted_loss)
+            return weighted_loss, metrics_aggregated
 
         return None, metrics_aggregated

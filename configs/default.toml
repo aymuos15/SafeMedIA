@@ -17,7 +17,7 @@ num_res_units = 2
 
 [federated]
 num_clients = 2
-num_rounds = 5  # Quick iterations
+num_rounds = 2  # Quick iterations
 fraction_fit = 1.0
 fraction_evaluate = 1.0
 min_fit_clients = 2
@@ -65,3 +65,9 @@ resume_from = ""  # Path to checkpoint for resumption (empty = start fresh)
 save_model = true
 save_metrics = true
 level = "INFO"
+
+[ssl]
+# Self-Supervised Learning / Transfer Learning settings
+# Set pretrained_checkpoint_path to use pretrained encoder, leave empty for random init
+pretrained_checkpoint_path = ""  # e.g., "checkpoints/pretrained_encoder.pt"
+freeze_encoder = false  # Whether to freeze encoder parameters during federated training
