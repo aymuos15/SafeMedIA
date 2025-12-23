@@ -36,7 +36,7 @@ momentum = 0.9
 
 [privacy]
 # DP style options: "none", "sample", "user", "hybrid"
-style = "hybrid"
+style = "user"
 target_delta = 1.0e-5
 client_dataset_size = 270
 

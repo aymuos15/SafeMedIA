@@ -87,6 +87,11 @@ min_available_clients = 8
 - `fraction_fit * num_clients` clients selected per round
 - Must satisfy: `fraction_fit * num_clients ≥ min_fit_clients`
 
+**User-Level DP Warning:**
+- For `privacy.style = "user"` or `"hybrid"`: **min_fit_clients ≥ 10 recommended**
+- With <10 clients, noise overwhelms signal → poor convergence/utility
+- See [Types of DP - Practical Considerations](../types_of_dp.md#practical-considerations-for-user-level-dp) for details
+
 ### [client_resources]
 
 Per-client resource allocation (for simulation).

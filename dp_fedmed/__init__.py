@@ -9,3 +9,7 @@ os.environ.setdefault("RAY_DISABLE_DASHBOARD", "1")
 os.environ.setdefault("RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO", "0")
 
 __version__ = "0.1.0"
+
+from . import utils  # noqa: E402
+
+__all__ = ["utils"]

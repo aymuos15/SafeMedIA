@@ -23,6 +23,7 @@ from monai.metrics.meandice import DiceMetric
 from loguru import logger
 
 from dp_fedmed.losses.dice import get_loss_function
+from dp_fedmed.utils import extract_batch_data
 
 
 def train_one_epoch(
@@ -60,25 +61,10 @@ def train_one_epoch(
 
     for batch in train_loader:
         # Handle both tuple and dict batch formats with validation
-        if isinstance(batch, dict):
-            if "image" not in batch or "label" not in batch:
-                logger.warning(f"Batch dict missing required keys: {batch.keys()}")
-                continue
-            images = batch["image"].to(device)
-            labels = batch["label"].to(device)
-        elif isinstance(batch, (tuple, list)) and len(batch) >= 2:
-            images, labels = batch[0], batch[1]
-            images = images.to(device)
-            labels = labels.to(device)
-        else:
-            logger.warning(f"Unexpected batch format: {type(batch)}, skipping")
+        batch_data = extract_batch_data(batch, device)
+        if batch_data is None:
             continue
-
-        # Ensure labels are [B, H, W] and long type for standard losses
-        if labels.dim() == 4 and labels.shape[1] == 1:
-            labels = labels.squeeze(1)
-
-        labels = labels.long()
+        images, labels = batch_data
 
         optimizer.zero_grad(set_to_none=True)
         outputs = model(images)
@@ -139,29 +125,14 @@ def evaluate(
     with torch.no_grad():
         for batch in test_loader:
             # Handle both tuple and dict batch formats with validation
-            if isinstance(batch, dict):
-                if "image" not in batch or "label" not in batch:
-                    logger.warning(f"Batch dict missing required keys: {batch.keys()}")
-                    continue
-                images = batch["image"].to(device)
-                labels = batch["label"].to(device)
-            elif isinstance(batch, (tuple, list)) and len(batch) >= 2:
-                images, labels = batch[0], batch[1]
-                images = images.to(device)
-                labels = labels.to(device)
-            else:
-                logger.warning(f"Unexpected batch format: {type(batch)}, skipping")
+            batch_data = extract_batch_data(batch, device)
+            if batch_data is None:
                 continue
+            images, labels = batch_data
 
             outputs = model(images)
 
             # Compute loss
-            # Ensure labels are [B, H, W] and long type
-            if labels.dim() == 4 and labels.shape[1] == 1:
-                labels = labels.squeeze(1)
-
-            labels = labels.long()
-
             loss = criterion(outputs, labels)
             total_loss += loss.item()
             num_batches += 1

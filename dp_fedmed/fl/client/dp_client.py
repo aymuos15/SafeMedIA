@@ -23,6 +23,7 @@ from loguru import logger
 from ...models.unet2d import create_unet2d, get_parameters, set_parameters
 from ..task import train_one_epoch, evaluate
 from ..checkpoint import load_unified_checkpoint, ClientState
+from ...utils import get_dataset_size
 
 
 class DPFlowerClient(NumPyClient):
@@ -284,10 +285,7 @@ class DPFlowerClient(NumPyClient):
             logger.info(f"Training complete. Average loss: {avg_loss:.4f}")
 
         # Store round metrics
-        try:
-            num_train_samples = len(self.train_loader.dataset)  # type: ignore
-        except (TypeError, AttributeError):
-            num_train_samples = 0
+        num_train_samples = get_dataset_size(self.train_loader)
 
         round_metrics = {
             "round": int(config.get("server_round", 0)),
@@ -303,10 +301,7 @@ class DPFlowerClient(NumPyClient):
         self._save_client_metrics()
 
         # Return updated parameters and metrics
-        try:
-            num_fit_samples = len(self.train_loader.dataset)  # type: ignore
-        except (TypeError, AttributeError):
-            num_fit_samples = 0
+        num_fit_samples = get_dataset_size(self.train_loader)
 
         return (
             get_parameters(self.model),
@@ -377,10 +372,7 @@ class DPFlowerClient(NumPyClient):
         # Save client metrics after evaluation
         self._save_client_metrics()
 
-        try:
-            num_test_samples = len(self.test_loader.dataset)  # type: ignore
-        except (TypeError, AttributeError):
-            num_test_samples = 0
+        num_test_samples = get_dataset_size(self.test_loader)
 
         return (
             metrics["loss"],
@@ -424,10 +416,7 @@ class DPFlowerClient(NumPyClient):
             final_dice = last_round.get("eval_dice", 0.0)
             total_epsilon = sum(r.get("epsilon", 0.0) for r in self.round_history)
 
-        try:
-            num_total_samples = len(self.train_loader.dataset)  # type: ignore
-        except (TypeError, AttributeError):
-            num_total_samples = 0
+        num_total_samples = get_dataset_size(self.train_loader)
 
         # Save metrics.json
         metrics_data = {

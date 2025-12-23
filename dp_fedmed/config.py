@@ -9,6 +9,9 @@ from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
+__all__ = ["Config", "load_config", "DPStyle"]
+
+
 class DPStyle(str, Enum):
     """Differential privacy styles."""
 
@@ -326,24 +329,3 @@ def load_config(config_path: Union[str, Path]) -> Config:
     logger.info(f"  DP style: {config.privacy.style}")
 
     return config
-
-
-def merge_configs(base: Dict, override: Dict) -> Dict:
-    """Recursively merge two configuration dictionaries.
-
-    Override values take precedence over base values.
-
-    Args:
-        base: Base configuration dictionary
-        override: Override configuration dictionary
-
-    Returns:
-        Merged configuration dictionary
-    """
-    result = base.copy()
-    for key, value in override.items():
-        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
-            result[key] = merge_configs(result[key], value)
-        else:
-            result[key] = value
-    return result
