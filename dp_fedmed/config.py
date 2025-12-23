@@ -223,6 +223,30 @@ class LoggingConfig(BaseModel):
         return v.upper()
 
 
+class SSLTransferConfig(BaseModel):
+    """SSL / Transfer learning configuration for supervised training."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    pretrained_checkpoint_path: Optional[str] = Field(default=None)
+    freeze_encoder: bool = Field(default=False)
+
+    @field_validator("pretrained_checkpoint_path", mode="before")
+    @classmethod
+    def validate_checkpoint_path(cls, v: Optional[str]) -> Optional[str]:
+        """Validate pretrained checkpoint path if provided."""
+        if v is not None and v.strip():
+            path = Path(v)
+            if not path.exists():
+                logger.warning(
+                    f"pretrained_checkpoint_path does not exist: {v}. "
+                    "Transfer learning will be disabled."
+                )
+                return None
+            return v
+        return None
+
+
 class Config(BaseModel):
     """Root configuration model for DP-FedMed."""
 
@@ -239,6 +263,7 @@ class Config(BaseModel):
     loss: LossConfig = Field(default_factory=LossConfig)
     checkpointing: CheckpointingConfig = Field(default_factory=CheckpointingConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
+    ssl: SSLTransferConfig = Field(default_factory=SSLTransferConfig)
 
     def get(self, key: str, default: Any = None) -> Any:
         """Get nested config value using dot notation (backward compatibility).
