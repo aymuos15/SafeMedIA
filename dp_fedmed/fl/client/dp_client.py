@@ -44,7 +44,7 @@ class DPFlowerClient(BaseFlowerClient):
         """Initialize the DP Flower client for supervised learning.
 
         Args:
-            train_loader: Training data loader (must have drop_last=True for DP)
+            train_loader: Training data loader (Opacus wraps with DPDataLoader)
             test_loader: Test data loader
             model_config: Model architecture configuration
             training_config: Training hyperparameters

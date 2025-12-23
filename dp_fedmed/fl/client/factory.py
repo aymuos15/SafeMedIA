@@ -358,12 +358,12 @@ def _create_ssl_client(
     )
 
     # Create data loaders
+    # Note: Opacus DPDataLoader uses Poisson sampling, so drop_last is ignored
     train_loader = torch.utils.data.DataLoader(
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
         num_workers=0,  # Avoid Opacus multiprocessing issues
-        drop_last=True,  # Important for Opacus DP
     )
 
     val_loader = None
