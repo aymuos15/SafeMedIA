@@ -30,6 +30,13 @@ def server_fn(context: fl.common.Context) -> ServerAppComponents:
     cfg = context.run_config
     config_file = str(cfg.get("config-file", "configs/default.toml"))
 
+    # Check training mode - delegate to SSL server if needed
+    mode_str = str(cfg.get("training-mode", "supervised"))
+    if mode_str == "ssl":
+        from dp_fedmed.fl.ssl.server_factory import server_fn as ssl_server_fn
+
+        return ssl_server_fn(context)
+
     try:
         config = load_config(config_file)
     except Exception as e:

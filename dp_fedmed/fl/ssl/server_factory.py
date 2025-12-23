@@ -60,21 +60,19 @@ def server_fn(context: fl.common.Context) -> ServerAppComponents:
     min_available_clients = int(config.get("federated.min_available_clients", 2))
     num_clients = int(config.get("federated.num_clients", 2))
 
-    # Get privacy settings
-    privacy_config_dict = config.get("privacy", {})
-    privacy_style = privacy_config_dict.get("style", "sample")
-    target_delta = privacy_config_dict.get("target_delta", 1e-5)
-    target_epsilon = privacy_config_dict.get("target_epsilon", 8.0)
+    # Get privacy settings (using Pydantic attribute access)
+    privacy_style = config.privacy.style
+    target_delta = config.privacy.target_delta
+    # target_epsilon is optional - only used for computing noise_multiplier
+    target_epsilon = float(config.get("privacy.target_epsilon", 8.0))
 
     # Sample-level (Opacus) settings
-    sample_config = privacy_config_dict.get("sample", {})
-    sample_noise_multiplier = sample_config.get("noise_multiplier", 1.0)
-    sample_max_grad_norm = sample_config.get("max_grad_norm", 1.0)
+    sample_noise_multiplier = config.privacy.sample.noise_multiplier
+    sample_max_grad_norm = config.privacy.sample.max_grad_norm
 
     # User-level (Server) settings
-    user_config = privacy_config_dict.get("user", {})
-    user_noise_multiplier = user_config.get("noise_multiplier", 0.0)
-    user_max_grad_norm = user_config.get("max_grad_norm", 1.0)
+    user_noise_multiplier = config.privacy.user.noise_multiplier
+    user_max_grad_norm = config.privacy.user.max_grad_norm
 
     # Get logging settings
     save_metrics = bool(config.get("logging.save_metrics", True))

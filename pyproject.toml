@@ -52,7 +52,12 @@ docs = [
 packages = ["dp_fedmed"]
 
 # ============================================================================
-# DEFAULT APP: Downstream Federated Learning (use: flwr run .)
+# UNIFIED APP: Supports both Supervised FL and SSL Pretraining
+#
+# Usage:
+#   Supervised FL:  flwr run . local-simulation
+#   SSL Pretraining: flwr run . ssl-simulation \
+#                    -c 'training-mode="ssl"' -c 'config-file="configs/pretraining.toml"'
 # ============================================================================
 [tool.flwr.app]
 publisher = "dp-fedmed"
@@ -63,11 +68,7 @@ clientapp = "dp_fedmed.fl.client.app:app"
 
 [tool.flwr.app.config]
 config-file = "configs/default.toml"
-
-# ============================================================================
-# SSL PRETRAINING: Use the script instead
-#   python scripts/run_ssl_pretraining.py configs/pretraining.toml
-# ============================================================================
+training-mode = "supervised"
 
 # ============================================================================
 # FEDERATION CONFIGURATIONS

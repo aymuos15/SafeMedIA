@@ -75,6 +75,14 @@ def client_fn(
     cfg = context.run_config
     config_file = str(cfg.get("config-file", config_file))
 
+    # Get training mode from run_config (allows runtime override)
+    mode_str = str(cfg.get("training-mode", mode.value))
+    try:
+        mode = TrainingMode(mode_str)
+    except ValueError:
+        logger.warning(f"Unknown training mode '{mode_str}', defaulting to supervised")
+        mode = TrainingMode.SUPERVISED
+
     try:
         config = load_config(config_file)
     except Exception as e:
