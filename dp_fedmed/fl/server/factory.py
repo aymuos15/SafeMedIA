@@ -5,65 +5,24 @@ server components for federated learning.
 """
 
 from pathlib import Path
-from typing import Tuple
+from typing import Dict
 
-import torch
 import flwr as fl
-from flwr.common import ndarrays_to_parameters, Parameters
+from flwr.common import ndarrays_to_parameters
 from flwr.server import ServerAppComponents, ServerConfig
 from loguru import logger
 
 from ...config import load_config
 from ...logging import setup_logging
-from ...models.unet2d import create_unet2d, get_parameters, set_parameters
+from ...models.unet2d import create_unet2d, get_parameters
+from ..checkpoint import (
+    resolve_checkpoint_path,
+    load_unified_checkpoint,
+    UnifiedCheckpointManager,
+    ClientState,
+)
 from .strategy import DPFedAvg
 from .aggregation import weighted_average
-
-
-def load_checkpoint(
-    checkpoint_path: Path, model
-) -> Tuple[Parameters, int, float, float]:
-    """Load checkpoint and return parameters with metadata.
-
-    Args:
-        checkpoint_path: Path to the checkpoint file
-        model: Model to load parameters into (for client-format checkpoints)
-
-    Returns:
-        Tuple of (parameters, resume_round, cumulative_epsilon, best_dice)
-    """
-    logger.info(f"Loading checkpoint from: {checkpoint_path}")
-
-    checkpoint = torch.load(checkpoint_path, weights_only=False)  # nosec B614
-
-    # Get round number (resume from next round)
-    checkpoint_round = checkpoint.get("round", 0)
-    resume_round = checkpoint_round + 1
-
-    # Get privacy state
-    cumulative_epsilon = checkpoint.get("cumulative_epsilon", 0.0)
-    best_dice = checkpoint.get("dice", 0.0)
-
-    # Handle different checkpoint formats
-    if "parameters" in checkpoint:
-        # Server-format checkpoint (numpy arrays)
-        parameters = ndarrays_to_parameters(checkpoint["parameters"])
-        logger.info(f"Loaded server-format checkpoint from round {checkpoint_round}")
-    elif "model" in checkpoint:
-        # Client-format checkpoint (state dict)
-        set_parameters(model, list(checkpoint["model"].values()))
-        parameters = ndarrays_to_parameters(get_parameters(model))
-        logger.info(f"Loaded client-format checkpoint from round {checkpoint_round}")
-    else:
-        raise ValueError(
-            "Unknown checkpoint format. Expected 'parameters' or 'model' key."
-        )
-
-    logger.info(f"  Resume round: {resume_round}")
-    logger.info(f"  Cumulative epsilon: {cumulative_epsilon:.4f}")
-    logger.info(f"  Best dice: {best_dice:.4f}")
-
-    return parameters, resume_round, cumulative_epsilon, best_dice
 
 
 def server_fn(context: fl.common.Context) -> ServerAppComponents:
@@ -162,35 +121,85 @@ def server_fn(context: fl.common.Context) -> ServerAppComponents:
     logger.info("✓ Initial model created")
     logger.info(f"  Model parameters: {sum(p.numel() for p in model.parameters()):,}")
 
+    # Get local epochs for checkpoint manager
+    local_epochs = int(config.get("training.local_epochs", 5))
+
+    # Unified checkpoint directory (at run level, not server level)
+    checkpoint_dir = run_dir.parent / "checkpoints"
+
     # Check for checkpoint resumption
     resume_from = config.get("checkpointing.resume_from")
     start_round = 1
     initial_parameters = None
+    remaining_rounds = num_rounds  # Default for fresh start
+    checkpoint_manager = None
+    client_resume_states: Dict[int, ClientState] = {}
+    is_mid_round_resume = False
 
-    if resume_from and resume_from.strip():
-        checkpoint_path = Path(resume_from)
-        if checkpoint_path.exists():
-            initial_parameters, start_round, prev_epsilon, prev_dice = load_checkpoint(
-                checkpoint_path, model
-            )
-            logger.info(f"✓ Resuming training from round {start_round}/{num_rounds}")
+    if resume_from:
+        try:
+            checkpoint_path = resolve_checkpoint_path(resume_from, run_dir.parent)
+            if checkpoint_path:
+                # Load unified checkpoint
+                checkpoint = load_unified_checkpoint(checkpoint_path)
+                logger.info(f"✓ Resolved checkpoint: {checkpoint_path}")
 
-            # Calculate remaining rounds
-            remaining_rounds = num_rounds - start_round + 1
-            if remaining_rounds <= 0:
-                logger.warning(
-                    f"Checkpoint is from round {start_round - 1}, "
-                    f"but num_rounds is {num_rounds}. Nothing to do."
+                # Get parameters from checkpoint
+                initial_parameters = ndarrays_to_parameters(
+                    checkpoint.server.parameters
                 )
-                remaining_rounds = 0
-        else:
-            logger.warning(f"Checkpoint not found at {resume_from}, starting fresh")
-            initial_parameters = ndarrays_to_parameters(get_parameters(model))
-            remaining_rounds = num_rounds
-    else:
+
+                # Determine resume behavior based on round status
+                if checkpoint.round.status == "in_progress":
+                    # Mid-round resume
+                    is_mid_round_resume = True
+                    start_round = checkpoint.round.current
+                    client_resume_states = checkpoint.clients
+                    logger.info(
+                        f"✓ Mid-round resume: round {start_round}, "
+                        f"{len(client_resume_states)} clients"
+                    )
+                else:
+                    # Round completed, resume from next round
+                    start_round = checkpoint.round.current + 1
+                    logger.info(
+                        f"✓ Resuming from completed round {checkpoint.round.current}"
+                    )
+
+                # Create checkpoint manager with loaded state
+                checkpoint_manager = UnifiedCheckpointManager(
+                    checkpoint_dir=checkpoint_dir,
+                    run_name=run_name,
+                    num_rounds=num_rounds,
+                    target_delta=target_delta,
+                )
+
+                # Calculate remaining rounds
+                remaining_rounds = num_rounds - start_round + 1
+                if remaining_rounds <= 0:
+                    logger.warning(
+                        f"Checkpoint is from round {checkpoint.round.current}, "
+                        f"but num_rounds is {num_rounds}. Nothing to do."
+                    )
+                    remaining_rounds = 0
+
+                logger.info(
+                    f"✓ Resuming training from round {start_round}/{num_rounds}"
+                )
+        except FileNotFoundError as e:
+            logger.error(f"Checkpoint resolution failed:\n{e}")
+            raise
+
+    if initial_parameters is None:
         # Fresh start
         initial_parameters = ndarrays_to_parameters(get_parameters(model))
         remaining_rounds = num_rounds
+        checkpoint_manager = UnifiedCheckpointManager(
+            checkpoint_dir=checkpoint_dir,
+            run_name=run_name,
+            num_rounds=num_rounds,
+            target_delta=target_delta,
+        )
 
     # Create strategy
     strategy = DPFedAvg(
@@ -208,6 +217,10 @@ def server_fn(context: fl.common.Context) -> ServerAppComponents:
         if privacy_style in ["user", "hybrid"]
         else 0.0,
         start_round=start_round,
+        local_epochs=local_epochs,
+        checkpoint_manager=checkpoint_manager,
+        client_resume_states=client_resume_states,
+        is_mid_round_resume=is_mid_round_resume,
         fraction_fit=fraction_fit,
         fraction_evaluate=fraction_evaluate,
         min_fit_clients=min_fit_clients,

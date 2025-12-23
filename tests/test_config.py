@@ -145,6 +145,24 @@ class TestCheckpointingConfig:
         config = CheckpointingConfig(resume_from=str(checkpoint))
         assert config.resume_from == str(checkpoint)
 
+    def test_resume_from_accepts_last_keyword(self):
+        """Test that 'last' keyword is accepted without path validation."""
+        config = CheckpointingConfig(resume_from="last")
+        assert config.resume_from == "last"
+
+    def test_resume_from_accepts_best_keyword(self):
+        """Test that 'best' keyword is accepted without path validation."""
+        config = CheckpointingConfig(resume_from="best")
+        assert config.resume_from == "best"
+
+    def test_resume_from_normalizes_keyword_case(self):
+        """Test that keywords are normalized to lowercase."""
+        config = CheckpointingConfig(resume_from="LAST")
+        assert config.resume_from == "last"
+
+        config = CheckpointingConfig(resume_from="Best")
+        assert config.resume_from == "best"
+
 
 class TestConfigBackwardCompatibility:
     """Tests for backward compatibility of Config class."""

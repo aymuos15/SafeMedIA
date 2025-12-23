@@ -106,7 +106,6 @@ lightning_logs/
 *.pickle
 
 # Results and outputs
-results/
 outputs/
 *.log
 

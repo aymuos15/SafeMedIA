@@ -3,10 +3,21 @@
 import json
 import logging
 from dataclasses import dataclass
-from typing import Dict, List
+from typing import Dict, List, Optional, Tuple
 from opacus.accountants import RDPAccountant
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class PartialRoundState:
+    """Tracks partial round progress for mid-round checkpointing."""
+
+    round_num: int
+    sample_history: List[Tuple[float, float, int]]  # (sigma, q, steps)
+    user_history: List[Tuple[float, float, int]]
+    partial_sample_epsilon: float
+    partial_user_epsilon: float
 
 
 @dataclass
@@ -40,6 +51,9 @@ class PrivacyAccountant:
         # Internal Opacus accountants for RDP composition
         self.sample_accountant = RDPAccountant()
         self.user_accountant = RDPAccountant()
+
+        # Partial round tracking for mid-round checkpointing
+        self._partial_state: Optional[PartialRoundState] = None
 
     def record_round(
         self,
@@ -147,3 +161,151 @@ class PrivacyAccountant:
                 num_samples=0,  # Not critical for RDP calculation
             )
         return accountant
+
+    # --- Partial Round Tracking for Mid-Round Checkpointing ---
+
+    def record_partial_progress(
+        self,
+        round_num: int,
+        noise_multiplier_sample: float,
+        sample_rate_sample: float,
+        steps_sample: int,
+        noise_multiplier_user: float = 0.0,
+        sample_rate_user: float = 0.0,
+        steps_user: int = 0,
+    ) -> Tuple[float, float]:
+        """Record partial progress within a round for checkpointing.
+
+        This tracks epsilon spent so far in the current round without
+        committing it to the final history.
+
+        Args:
+            round_num: Current round number
+            noise_multiplier_sample: Sample-level noise multiplier
+            sample_rate_sample: Sample rate for DP-SGD
+            steps_sample: Number of DP-SGD steps completed
+            noise_multiplier_user: User-level noise multiplier
+            sample_rate_user: User sample rate
+            steps_user: User-level DP steps
+
+        Returns:
+            Tuple of (partial_sample_epsilon, partial_user_epsilon)
+        """
+        # Build partial history
+        sample_history = []
+        user_history = []
+
+        if noise_multiplier_sample > 0 and steps_sample > 0:
+            sample_history.append(
+                (noise_multiplier_sample, sample_rate_sample, steps_sample)
+            )
+
+        if noise_multiplier_user > 0 and steps_user > 0:
+            user_history.append((noise_multiplier_user, sample_rate_user, steps_user))
+
+        # Compute partial epsilon by creating temp accountants
+        partial_sample_eps = 0.0
+        if sample_history:
+            temp_accountant = RDPAccountant()
+            temp_accountant.history = list(self.sample_accountant.history)
+            temp_accountant.history.extend(sample_history)
+            full_eps = temp_accountant.get_epsilon(delta=self.target_delta)
+            partial_sample_eps = full_eps - self.get_cumulative_sample_epsilon()
+
+        partial_user_eps = 0.0
+        if user_history:
+            temp_accountant = RDPAccountant()
+            temp_accountant.history = list(self.user_accountant.history)
+            temp_accountant.history.extend(user_history)
+            full_eps = temp_accountant.get_epsilon(delta=self.target_delta)
+            partial_user_eps = full_eps - self.get_cumulative_user_epsilon()
+
+        # Store partial state
+        self._partial_state = PartialRoundState(
+            round_num=round_num,
+            sample_history=sample_history,
+            user_history=user_history,
+            partial_sample_epsilon=partial_sample_eps,
+            partial_user_epsilon=partial_user_eps,
+        )
+
+        return partial_sample_eps, partial_user_eps
+
+    def finalize_partial_round(self) -> None:
+        """Finalize partial round by committing to history.
+
+        Called when a round completes successfully. Converts partial
+        state into committed history.
+        """
+        if self._partial_state is None:
+            return
+
+        # Commit sample history
+        for entry in self._partial_state.sample_history:
+            self.sample_accountant.history.append(entry)
+
+        # Commit user history
+        for entry in self._partial_state.user_history:
+            self.user_accountant.history.append(entry)
+
+        logger.info(
+            f"Finalized round {self._partial_state.round_num}: "
+            f"partial_sample_eps={self._partial_state.partial_sample_epsilon:.4f}, "
+            f"partial_user_eps={self._partial_state.partial_user_epsilon:.4f}"
+        )
+
+        self._partial_state = None
+
+    def get_partial_state(self) -> Optional[PartialRoundState]:
+        """Get current partial round state for checkpointing."""
+        return self._partial_state
+
+    def restore_partial_state(
+        self,
+        round_num: int,
+        sample_history: List[Tuple[float, float, int]],
+        user_history: List[Tuple[float, float, int]],
+        partial_sample_epsilon: float,
+        partial_user_epsilon: float,
+    ) -> None:
+        """Restore partial round state from checkpoint.
+
+        Args:
+            round_num: Round number being resumed
+            sample_history: Sample-level RDP history entries
+            user_history: User-level RDP history entries
+            partial_sample_epsilon: Epsilon spent so far in round
+            partial_user_epsilon: User epsilon spent so far
+        """
+        self._partial_state = PartialRoundState(
+            round_num=round_num,
+            sample_history=sample_history,
+            user_history=user_history,
+            partial_sample_epsilon=partial_sample_epsilon,
+            partial_user_epsilon=partial_user_epsilon,
+        )
+
+        logger.info(
+            f"Restored partial state for round {round_num}: "
+            f"sample_eps={partial_sample_epsilon:.4f}, "
+            f"user_eps={partial_user_epsilon:.4f}"
+        )
+
+    def get_total_epsilon_with_partial(self) -> Tuple[float, float]:
+        """Get total epsilon including any partial round progress.
+
+        Returns:
+            Tuple of (total_sample_epsilon, total_user_epsilon)
+        """
+        sample_eps = self.get_cumulative_sample_epsilon()
+        user_eps = self.get_cumulative_user_epsilon()
+
+        if self._partial_state:
+            sample_eps += self._partial_state.partial_sample_epsilon
+            user_eps += self._partial_state.partial_user_epsilon
+
+        return sample_eps, user_eps
+
+    def clear_partial_state(self) -> None:
+        """Clear partial state without committing."""
+        self._partial_state = None

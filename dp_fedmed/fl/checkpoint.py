@@ -1,16 +1,209 @@
-"""Checkpointing utilities for federated learning.
+"""Unified checkpointing for federated learning with mid-round recovery.
 
-This module provides unified checkpointing for both server-side (FL Parameters)
-and client-side (PyTorch models) use cases.
+This module provides a unified checkpoint system that captures both server
+and client state in a single file, enabling recovery from mid-round crashes.
 """
 
+from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional, Union, cast
+from typing import Any, Dict, List, Optional, Tuple, cast
+import os
+import tempfile
 
+import numpy as np
 import torch
 import torch.nn as nn
-from flwr.common import Parameters, parameters_to_ndarrays, ndarrays_to_parameters
+from flwr.common import Parameters, ndarrays_to_parameters
 from loguru import logger
+
+
+# Checkpoint version for future format migrations
+CHECKPOINT_VERSION = "2.0"
+
+
+@dataclass
+class EpochProgress:
+    """Tracks epoch progress within a round."""
+
+    current: int
+    total: int
+    status: str  # "in_progress" | "completed"
+
+
+@dataclass
+class ClientState:
+    """Per-client training state for mid-round recovery."""
+
+    client_id: int
+    epoch: EpochProgress
+    model_state: Optional[Dict[str, torch.Tensor]] = None
+    optimizer_state: Optional[Dict[str, Any]] = None
+    partial_metrics: Dict[str, float] = field(
+        default_factory=lambda: {"loss_sum": 0.0, "epochs_done": 0}
+    )
+    partial_privacy: Dict[str, float] = field(
+        default_factory=lambda: {"epsilon": 0.0, "steps": 0}
+    )
+    # Cached results for completed clients
+    final_parameters: Optional[List[np.ndarray]] = None
+    final_metrics: Optional[Dict[str, float]] = None
+    num_samples: int = 0
+
+
+@dataclass
+class ServerState:
+    """Server-side FL state."""
+
+    parameters: List[np.ndarray]
+    best_dice: float = 0.0
+    metrics: Dict[str, float] = field(default_factory=dict)
+
+
+@dataclass
+class RoundProgress:
+    """Tracks round progress."""
+
+    current: int
+    total: int
+    status: str  # "in_progress" | "completed"
+
+
+@dataclass
+class PrivacyState:
+    """Privacy accounting state."""
+
+    target_delta: float
+    sample_history: List[Tuple[float, float, int]] = field(
+        default_factory=list
+    )  # (sigma, q, steps)
+    user_history: List[Tuple[float, float, int]] = field(default_factory=list)
+    cumulative_sample_epsilon: float = 0.0
+    cumulative_user_epsilon: float = 0.0
+    partial_round_epsilon: float = 0.0
+
+
+@dataclass
+class UnifiedCheckpoint:
+    """Complete FL system state for mid-round recovery."""
+
+    version: str
+    timestamp: str
+    run_name: str
+    round: RoundProgress
+    server: ServerState
+    clients: Dict[int, ClientState]
+    privacy: PrivacyState
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for serialization."""
+        return {
+            "version": self.version,
+            "timestamp": self.timestamp,
+            "run_name": self.run_name,
+            "round": {
+                "current": self.round.current,
+                "total": self.round.total,
+                "status": self.round.status,
+            },
+            "server": {
+                "parameters": self.server.parameters,
+                "best_dice": self.server.best_dice,
+                "metrics": self.server.metrics,
+            },
+            "clients": {
+                cid: {
+                    "client_id": cs.client_id,
+                    "epoch": {
+                        "current": cs.epoch.current,
+                        "total": cs.epoch.total,
+                        "status": cs.epoch.status,
+                    },
+                    "model_state": cs.model_state,
+                    "optimizer_state": cs.optimizer_state,
+                    "partial_metrics": cs.partial_metrics,
+                    "partial_privacy": cs.partial_privacy,
+                    "final_parameters": cs.final_parameters,
+                    "final_metrics": cs.final_metrics,
+                    "num_samples": cs.num_samples,
+                }
+                for cid, cs in self.clients.items()
+            },
+            "privacy": {
+                "target_delta": self.privacy.target_delta,
+                "sample_history": self.privacy.sample_history,
+                "user_history": self.privacy.user_history,
+                "cumulative_sample_epsilon": self.privacy.cumulative_sample_epsilon,
+                "cumulative_user_epsilon": self.privacy.cumulative_user_epsilon,
+                "partial_round_epsilon": self.privacy.partial_round_epsilon,
+            },
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "UnifiedCheckpoint":
+        """Create from dictionary."""
+        round_data = data["round"]
+        server_data = data["server"]
+        privacy_data = data["privacy"]
+
+        clients = {}
+        for cid_str, cs_data in data["clients"].items():
+            try:
+                cid = int(cid_str)
+            except ValueError:
+                raise ValueError(
+                    f"Checkpoint corrupted: invalid client ID '{cid_str}'. "
+                    "Expected numeric client ID."
+                )
+            epoch_data = cs_data["epoch"]
+            clients[cid] = ClientState(
+                client_id=cs_data["client_id"],
+                epoch=EpochProgress(
+                    current=epoch_data["current"],
+                    total=epoch_data["total"],
+                    status=epoch_data["status"],
+                ),
+                model_state=cs_data.get("model_state"),
+                optimizer_state=cs_data.get("optimizer_state"),
+                partial_metrics=cs_data.get(
+                    "partial_metrics", {"loss_sum": 0.0, "epochs_done": 0}
+                ),
+                partial_privacy=cs_data.get(
+                    "partial_privacy", {"epsilon": 0.0, "steps": 0}
+                ),
+                final_parameters=cs_data.get("final_parameters"),
+                final_metrics=cs_data.get("final_metrics"),
+                num_samples=cs_data.get("num_samples", 0),
+            )
+
+        return cls(
+            version=data["version"],
+            timestamp=data["timestamp"],
+            run_name=data["run_name"],
+            round=RoundProgress(
+                current=round_data["current"],
+                total=round_data["total"],
+                status=round_data["status"],
+            ),
+            server=ServerState(
+                parameters=server_data["parameters"],
+                best_dice=server_data.get("best_dice", 0.0),
+                metrics=server_data.get("metrics", {}),
+            ),
+            clients=clients,
+            privacy=PrivacyState(
+                target_delta=privacy_data["target_delta"],
+                sample_history=privacy_data.get("sample_history", []),
+                user_history=privacy_data.get("user_history", []),
+                cumulative_sample_epsilon=privacy_data.get(
+                    "cumulative_sample_epsilon", 0.0
+                ),
+                cumulative_user_epsilon=privacy_data.get(
+                    "cumulative_user_epsilon", 0.0
+                ),
+                partial_round_epsilon=privacy_data.get("partial_round_epsilon", 0.0),
+            ),
+        )
 
 
 def get_model_state_dict(model: nn.Module) -> Dict[str, Any]:
@@ -27,289 +220,422 @@ def get_model_state_dict(model: nn.Module) -> Dict[str, Any]:
     return model.state_dict()
 
 
-def save_model_checkpoint(
-    model: nn.Module,
-    checkpoint_dir: Path,
-    dice_score: Optional[float] = None,
-    is_best: bool = False,
-    extra_metadata: Optional[Dict[str, Any]] = None,
-) -> Path:
-    """Save a PyTorch model checkpoint.
+def _atomic_save(data: Dict[str, Any], path: Path) -> None:
+    """Save checkpoint atomically using temp file + rename.
 
     Args:
-        model: Model to checkpoint
+        data: Data to save
+        path: Target path
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Write to temp file in same directory (for atomic rename)
+    fd, tmp_path = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+    try:
+        os.close(fd)
+        torch.save(data, tmp_path)
+        os.replace(tmp_path, path)  # Atomic on POSIX
+    except Exception:
+        # Clean up temp file on error
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        raise
+
+
+def save_unified_checkpoint(
+    checkpoint: UnifiedCheckpoint,
+    checkpoint_dir: Path,
+    is_best: bool = False,
+) -> Path:
+    """Save unified checkpoint.
+
+    Args:
+        checkpoint: Unified checkpoint data
         checkpoint_dir: Directory to save to
-        dice_score: Optional dice score to include in checkpoint
         is_best: Whether this is the best model so far
-        extra_metadata: Additional metadata to save
 
     Returns:
         Path to saved checkpoint
     """
     checkpoint_dir = Path(checkpoint_dir)
-    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_data = checkpoint.to_dict()
 
-    state_dict = get_model_state_dict(model)
+    # Always save last checkpoint
+    last_path = checkpoint_dir / "last.pt"
+    _atomic_save(checkpoint_data, last_path)
 
-    checkpoint_data: Dict[str, Any] = {"model": state_dict}
-    if dice_score is not None:
-        checkpoint_data["dice"] = dice_score
-    if extra_metadata:
-        checkpoint_data.update(extra_metadata)
-
-    # Always save last model
-    last_path = checkpoint_dir / "last_model.pt"
-    torch.save(checkpoint_data, last_path)
-
-    # Save best model if requested
+    # Save best checkpoint if requested
     if is_best:
-        best_path = checkpoint_dir / "best_model.pt"
-        torch.save(checkpoint_data, best_path)
-        logger.info(f"New best model saved (dice={dice_score:.4f})")
+        best_path = checkpoint_dir / "best.pt"
+        _atomic_save(checkpoint_data, best_path)
+        logger.info(
+            f"New best checkpoint saved (dice={checkpoint.server.best_dice:.4f})"
+        )
         return best_path
 
     return last_path
 
 
-def save_server_checkpoint(
-    parameters: Parameters,
-    checkpoint_dir: Path,
-    round_num: int,
-    dice_score: float,
-    cumulative_epsilon: float,
-    is_best: bool = False,
-    extra_metadata: Optional[Dict[str, Any]] = None,
-) -> Path:
-    """Save server-side FL parameters checkpoint.
-
-    Args:
-        parameters: FL Parameters to save
-        checkpoint_dir: Directory to save to
-        round_num: Current round number
-        dice_score: Aggregated dice score
-        cumulative_epsilon: Cumulative privacy budget spent
-        is_best: Whether this is the best model so far
-        extra_metadata: Additional metadata to save
-
-    Returns:
-        Path to saved checkpoint
-    """
-    checkpoint_dir = Path(checkpoint_dir)
-    checkpoint_dir.mkdir(parents=True, exist_ok=True)
-
-    params_ndarrays = parameters_to_ndarrays(parameters)
-
-    checkpoint_data = {
-        "parameters": params_ndarrays,
-        "round": round_num,
-        "cumulative_epsilon": cumulative_epsilon,
-        "dice": dice_score,
-    }
-    if extra_metadata:
-        checkpoint_data.update(extra_metadata)
-
-    # Always save last model
-    last_path = checkpoint_dir / "last_model.pt"
-    torch.save(checkpoint_data, last_path)
-
-    # Save best model if requested
-    if is_best:
-        best_path = checkpoint_dir / "best_model.pt"
-        torch.save(checkpoint_data, best_path)
-        logger.info(f"New best model saved (dice={dice_score:.4f})")
-        return best_path
-
-    return last_path
-
-
-def load_model_checkpoint(
-    checkpoint_path: Path,
-    model: Optional[nn.Module] = None,
-    device: Optional[torch.device] = None,
-) -> Dict[str, Any]:
-    """Load a PyTorch model checkpoint.
-
-    Args:
-        checkpoint_path: Path to checkpoint file
-        model: Optional model to load weights into
-        device: Device to load tensors to
-
-    Returns:
-        Checkpoint dictionary with 'model' key and any extra metadata
-    """
-    checkpoint_path = Path(checkpoint_path)
-    if not checkpoint_path.exists():
-        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
-
-    map_location = device if device else "cpu"
-    checkpoint = torch.load(
-        checkpoint_path, map_location=map_location, weights_only=True
-    )
-
-    if model is not None:
-        state_dict = checkpoint.get("model", checkpoint)
-        if hasattr(model, "_module"):
-            cast(nn.Module, model._module).load_state_dict(state_dict)
-        else:
-            model.load_state_dict(state_dict)
-        logger.info(f"Loaded model weights from {checkpoint_path}")
-
-    return checkpoint
-
-
-def load_server_checkpoint(
-    checkpoint_path: Path,
-) -> Dict[str, Any]:
-    """Load a server-side FL checkpoint.
+def load_unified_checkpoint(checkpoint_path: Path) -> UnifiedCheckpoint:
+    """Load unified checkpoint.
 
     Args:
         checkpoint_path: Path to checkpoint file
 
     Returns:
-        Dictionary with:
-            - parameters: FL Parameters object
-            - round: Round number
-            - cumulative_epsilon: Privacy budget spent
-            - dice: Dice score at checkpoint
+        Unified checkpoint object
+
+    Raises:
+        FileNotFoundError: If checkpoint doesn't exist
     """
     checkpoint_path = Path(checkpoint_path)
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
 
-    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+    checkpoint_data = torch.load(
+        checkpoint_path, map_location="cpu", weights_only=False
+    )  # nosec B614
 
-    # Convert numpy arrays back to FL Parameters
-    params_ndarrays = checkpoint.get("parameters")
-    if params_ndarrays is not None:
-        parameters = ndarrays_to_parameters(params_ndarrays)
-        checkpoint["parameters"] = parameters
+    # Validate version
+    version = checkpoint_data.get("version", "1.0")
+    if not version.startswith("2."):
+        raise ValueError(f"Incompatible checkpoint version: {version}. Expected 2.x")
+
+    checkpoint = UnifiedCheckpoint.from_dict(checkpoint_data)
 
     logger.info(
-        f"Loaded server checkpoint from {checkpoint_path} "
-        f"(round={checkpoint.get('round', '?')}, dice={checkpoint.get('dice', 0):.4f})"
+        f"Loaded unified checkpoint from {checkpoint_path} "
+        f"(round={checkpoint.round.current}/{checkpoint.round.total}, "
+        f"status={checkpoint.round.status})"
     )
 
     return checkpoint
 
 
-class CheckpointManager:
-    """Manages checkpointing with best model tracking.
+def resolve_checkpoint_path(
+    resume_from: Optional[str],
+    run_dir: Path,
+) -> Optional[Path]:
+    """Resolve checkpoint path from config value.
 
-    This class provides a stateful wrapper around the checkpoint functions,
-    automatically tracking the best dice score.
+    Args:
+        resume_from: Config value - "last", "best", or absolute path
+        run_dir: Run directory (parent of checkpoints/)
+
+    Returns:
+        Resolved path or None if no resume
+
+    Raises:
+        FileNotFoundError: If specified checkpoint doesn't exist
+        ValueError: If resume_from is invalid
     """
+    if not resume_from:
+        return None
 
-    def __init__(self, checkpoint_dir: Path, mode: str = "model"):
+    resume_from = resume_from.strip()
+    if not resume_from:
+        return None
+
+    checkpoint_dir = run_dir / "checkpoints"
+
+    if resume_from.lower() == "last":
+        path = checkpoint_dir / "last.pt"
+        if not path.exists():
+            raise FileNotFoundError(f"No last checkpoint found at {path}")
+        return path
+
+    if resume_from.lower() == "best":
+        path = checkpoint_dir / "best.pt"
+        if not path.exists():
+            raise FileNotFoundError(f"No best checkpoint found at {path}")
+        return path
+
+    # Absolute path
+    path = Path(resume_from)
+    if not path.is_absolute():
+        raise ValueError(
+            f"resume_from must be 'last', 'best', or absolute path. Got: {resume_from}"
+        )
+    if not path.exists():
+        raise FileNotFoundError(f"Checkpoint not found: {path}")
+
+    return path
+
+
+class UnifiedCheckpointManager:
+    """Manages unified checkpoints for FL runs."""
+
+    def __init__(
+        self,
+        checkpoint_dir: Path,
+        run_name: str,
+        num_rounds: int,
+        target_delta: float = 1e-5,
+    ):
         """Initialize checkpoint manager.
 
         Args:
             checkpoint_dir: Directory to save checkpoints
-            mode: Either 'model' for client-side or 'server' for server-side
+            run_name: Name of the run
+            num_rounds: Total number of rounds
+            target_delta: Privacy delta value
         """
         self.checkpoint_dir = Path(checkpoint_dir)
-        self.mode = mode
+        self.run_name = run_name
+        self.num_rounds = num_rounds
+        self.target_delta = target_delta
+
         self.best_dice = 0.0
+        self._current_checkpoint: Optional[UnifiedCheckpoint] = None
 
-        # Try to load existing best dice from checkpoint
-        self._load_best_dice()
+        # Try to load existing checkpoint
+        self._load_existing()
 
-    def _load_best_dice(self) -> None:
-        """Load best dice score from existing checkpoint if available."""
-        best_path = self.checkpoint_dir / "best_model.pt"
-        if best_path.exists():
+    def _load_existing(self) -> None:
+        """Load existing checkpoint if available."""
+        last_path = self.checkpoint_dir / "last.pt"
+        if last_path.exists():
             try:
-                checkpoint = torch.load(
-                    best_path, map_location="cpu", weights_only=True
-                )
-                self.best_dice = checkpoint.get("dice", 0.0)
-                logger.debug(f"Loaded best dice from checkpoint: {self.best_dice:.4f}")
+                checkpoint = load_unified_checkpoint(last_path)
+                self._current_checkpoint = checkpoint
+                self.best_dice = checkpoint.server.best_dice
+                logger.debug(f"Loaded existing checkpoint: {self.best_dice:.4f}")
             except Exception as e:
-                logger.warning(f"Could not load best dice from checkpoint: {e}")
+                logger.warning(f"Could not load existing checkpoint: {e}")
 
-    def save(
+    def create_initial_checkpoint(
         self,
-        model_or_params: Union[nn.Module, Parameters],
-        dice_score: float,
-        round_num: Optional[int] = None,
-        cumulative_epsilon: Optional[float] = None,
-        extra_metadata: Optional[Dict[str, Any]] = None,
-    ) -> Path:
-        """Save checkpoint, automatically tracking best model.
+        parameters: List[np.ndarray],
+        num_clients: int,
+        local_epochs: int,
+    ) -> UnifiedCheckpoint:
+        """Create initial checkpoint for a fresh run.
 
         Args:
-            model_or_params: Model (client-side) or Parameters (server-side)
-            dice_score: Current dice score
-            round_num: Round number (required for server mode)
-            cumulative_epsilon: Privacy budget spent (required for server mode)
-            extra_metadata: Additional metadata to save
+            parameters: Initial global model parameters
+            num_clients: Number of clients
+            local_epochs: Local epochs per round
+
+        Returns:
+            Initial unified checkpoint
+        """
+        clients = {
+            i: ClientState(
+                client_id=i,
+                epoch=EpochProgress(current=0, total=local_epochs, status="pending"),
+            )
+            for i in range(num_clients)
+        }
+
+        checkpoint = UnifiedCheckpoint(
+            version=CHECKPOINT_VERSION,
+            timestamp=datetime.now().isoformat(),
+            run_name=self.run_name,
+            round=RoundProgress(current=1, total=self.num_rounds, status="in_progress"),
+            server=ServerState(parameters=parameters),
+            clients=clients,
+            privacy=PrivacyState(target_delta=self.target_delta),
+        )
+
+        self._current_checkpoint = checkpoint
+        return checkpoint
+
+    def update_client_epoch(
+        self,
+        client_id: int,
+        epoch: int,
+        total_epochs: int,
+        model_state: Optional[Dict[str, torch.Tensor]] = None,
+        optimizer_state: Optional[Dict[str, Any]] = None,
+        epoch_loss: float = 0.0,
+        partial_epsilon: float = 0.0,
+        partial_steps: int = 0,
+    ) -> None:
+        """Update client's epoch progress.
+
+        Args:
+            client_id: Client ID
+            epoch: Current epoch (0-indexed, after completion)
+            total_epochs: Total epochs
+            model_state: Model state dict
+            optimizer_state: Optimizer state dict
+            epoch_loss: Loss for this epoch
+            partial_epsilon: Epsilon spent so far
+            partial_steps: DP steps so far
+        """
+        if self._current_checkpoint is None:
+            raise RuntimeError("No checkpoint initialized")
+
+        client = self._current_checkpoint.clients.get(client_id)
+        if client is None:
+            # Create new client state
+            client = ClientState(
+                client_id=client_id,
+                epoch=EpochProgress(
+                    current=0, total=total_epochs, status="in_progress"
+                ),
+            )
+            self._current_checkpoint.clients[client_id] = client
+
+        # Update epoch progress
+        client.epoch.current = epoch + 1  # Store 1-indexed
+        client.epoch.total = total_epochs
+        client.epoch.status = (
+            "completed" if epoch + 1 >= total_epochs else "in_progress"
+        )
+
+        # Update model state if provided
+        if model_state is not None:
+            client.model_state = model_state
+        if optimizer_state is not None:
+            client.optimizer_state = optimizer_state
+
+        # Accumulate metrics
+        client.partial_metrics["loss_sum"] += epoch_loss
+        client.partial_metrics["epochs_done"] = epoch + 1
+        client.partial_privacy["epsilon"] = partial_epsilon
+        client.partial_privacy["steps"] = partial_steps
+
+        # Update timestamp
+        self._current_checkpoint.timestamp = datetime.now().isoformat()
+
+    def mark_client_completed(
+        self,
+        client_id: int,
+        final_parameters: List[np.ndarray],
+        final_metrics: Dict[str, float],
+        num_samples: int,
+    ) -> None:
+        """Mark client's round as completed with final results.
+
+        Args:
+            client_id: Client ID
+            final_parameters: Final model parameters
+            final_metrics: Final metrics dict
+            num_samples: Number of training samples
+        """
+        if self._current_checkpoint is None:
+            raise RuntimeError("No checkpoint initialized")
+
+        client = self._current_checkpoint.clients.get(client_id)
+        if client is None:
+            raise KeyError(f"Client {client_id} not found in checkpoint")
+
+        client.epoch.status = "completed"
+        client.final_parameters = final_parameters
+        client.final_metrics = final_metrics
+        client.num_samples = num_samples
+
+        # Clear intermediate state (no longer needed)
+        client.model_state = None
+        client.optimizer_state = None
+
+    def update_server_state(
+        self,
+        parameters: List[np.ndarray],
+        metrics: Dict[str, float],
+        round_num: int,
+        cumulative_sample_epsilon: float = 0.0,
+        cumulative_user_epsilon: float = 0.0,
+    ) -> None:
+        """Update server state after aggregation.
+
+        Args:
+            parameters: Aggregated global parameters
+            metrics: Aggregated metrics
+            round_num: Current round number
+            cumulative_sample_epsilon: Cumulative sample epsilon
+            cumulative_user_epsilon: Cumulative user epsilon
+        """
+        if self._current_checkpoint is None:
+            raise RuntimeError("No checkpoint initialized")
+
+        self._current_checkpoint.server.parameters = parameters
+        self._current_checkpoint.server.metrics = metrics
+        self._current_checkpoint.round.current = round_num
+
+        # Update privacy state
+        self._current_checkpoint.privacy.cumulative_sample_epsilon = (
+            cumulative_sample_epsilon
+        )
+        self._current_checkpoint.privacy.cumulative_user_epsilon = (
+            cumulative_user_epsilon
+        )
+
+        # Update timestamp
+        self._current_checkpoint.timestamp = datetime.now().isoformat()
+
+    def mark_round_completed(self, dice_score: float) -> None:
+        """Mark current round as completed.
+
+        Args:
+            dice_score: Final dice score for the round
+        """
+        if self._current_checkpoint is None:
+            raise RuntimeError("No checkpoint initialized")
+
+        self._current_checkpoint.round.status = "completed"
+        self._current_checkpoint.server.metrics["dice"] = dice_score
+
+        # Check if best
+        if dice_score > self.best_dice:
+            self.best_dice = dice_score
+            self._current_checkpoint.server.best_dice = dice_score
+
+    def start_next_round(self, round_num: int, local_epochs: int) -> None:
+        """Start a new round.
+
+        Args:
+            round_num: New round number
+            local_epochs: Local epochs for this round
+        """
+        if self._current_checkpoint is None:
+            raise RuntimeError("No checkpoint initialized")
+
+        self._current_checkpoint.round.current = round_num
+        self._current_checkpoint.round.status = "in_progress"
+
+        # Reset client epoch progress
+        for client in self._current_checkpoint.clients.values():
+            client.epoch = EpochProgress(
+                current=0, total=local_epochs, status="in_progress"
+            )
+            client.model_state = None
+            client.optimizer_state = None
+            client.partial_metrics = {"loss_sum": 0.0, "epochs_done": 0}
+            client.partial_privacy = {"epsilon": 0.0, "steps": 0}
+            client.final_parameters = None
+            client.final_metrics = None
+
+    def save(self) -> Path:
+        """Save current checkpoint.
 
         Returns:
             Path to saved checkpoint
         """
-        is_best = dice_score > self.best_dice
-        if is_best:
-            self.best_dice = dice_score
+        if self._current_checkpoint is None:
+            raise RuntimeError("No checkpoint to save")
 
-        if self.mode == "server":
-            if round_num is None or cumulative_epsilon is None:
-                raise ValueError(
-                    "round_num and cumulative_epsilon required for server mode"
-                )
-            if not isinstance(model_or_params, Parameters):
-                raise ValueError("model_or_params must be Parameters in server mode")
-            return save_server_checkpoint(
-                parameters=model_or_params,
-                checkpoint_dir=self.checkpoint_dir,
-                round_num=round_num,
-                dice_score=dice_score,
-                cumulative_epsilon=cumulative_epsilon,
-                is_best=is_best,
-                extra_metadata=extra_metadata,
-            )
-        else:
-            if not isinstance(model_or_params, nn.Module):
-                raise ValueError("model_or_params must be nn.Module in model mode")
-            return save_model_checkpoint(
-                model=model_or_params,
-                checkpoint_dir=self.checkpoint_dir,
-                dice_score=dice_score,
-                is_best=is_best,
-                extra_metadata=extra_metadata,
-            )
+        is_best = (
+            self._current_checkpoint.server.metrics.get("dice", 0) >= self.best_dice
+            and self._current_checkpoint.round.status == "completed"
+        )
 
-    def load_best(
-        self, model: Optional[nn.Module] = None, device: Optional[torch.device] = None
-    ) -> Dict[str, Any]:
-        """Load the best checkpoint.
+        return save_unified_checkpoint(
+            self._current_checkpoint,
+            self.checkpoint_dir,
+            is_best=is_best,
+        )
 
-        Args:
-            model: Optional model to load weights into (client mode only)
-            device: Device to load tensors to
+    def get_current_checkpoint(self) -> Optional[UnifiedCheckpoint]:
+        """Get current checkpoint object."""
+        return self._current_checkpoint
 
-        Returns:
-            Checkpoint dictionary
-        """
-        best_path = self.checkpoint_dir / "best_model.pt"
-        if self.mode == "server":
-            return load_server_checkpoint(best_path)
-        return load_model_checkpoint(best_path, model, device)
-
-    def load_last(
-        self, model: Optional[nn.Module] = None, device: Optional[torch.device] = None
-    ) -> Dict[str, Any]:
-        """Load the last checkpoint.
-
-        Args:
-            model: Optional model to load weights into (client mode only)
-            device: Device to load tensors to
-
-        Returns:
-            Checkpoint dictionary
-        """
-        last_path = self.checkpoint_dir / "last_model.pt"
-        if self.mode == "server":
-            return load_server_checkpoint(last_path)
-        return load_model_checkpoint(last_path, model, device)
+    def get_client_state(self, client_id: int) -> Optional[ClientState]:
+        """Get client state from current checkpoint."""
+        if self._current_checkpoint is None:
+            return None
+        return self._current_checkpoint.clients.get(client_id)
 
     def has_checkpoint(self, which: str = "last") -> bool:
         """Check if a checkpoint exists.
@@ -320,5 +646,39 @@ class CheckpointManager:
         Returns:
             True if checkpoint exists
         """
-        path = self.checkpoint_dir / f"{which}_model.pt"
+        path = self.checkpoint_dir / f"{which}.pt"
         return path.exists()
+
+    def is_mid_round_resume(self) -> bool:
+        """Check if this is a mid-round resume scenario.
+
+        Returns:
+            True if resuming from mid-round
+        """
+        if self._current_checkpoint is None:
+            return False
+        return self._current_checkpoint.round.status == "in_progress"
+
+    def get_resume_round(self) -> int:
+        """Get the round to resume from.
+
+        Returns:
+            Round number to resume from
+        """
+        if self._current_checkpoint is None:
+            return 1
+        if self._current_checkpoint.round.status == "completed":
+            # Resume from next round
+            return self._current_checkpoint.round.current + 1
+        # Resume same round (mid-round)
+        return self._current_checkpoint.round.current
+
+    def get_parameters_as_fl(self) -> Optional[Parameters]:
+        """Get server parameters as FL Parameters object.
+
+        Returns:
+            FL Parameters or None
+        """
+        if self._current_checkpoint is None:
+            return None
+        return ndarrays_to_parameters(self._current_checkpoint.server.parameters)

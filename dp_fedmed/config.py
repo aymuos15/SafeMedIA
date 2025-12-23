@@ -163,7 +163,11 @@ class LossConfig(BaseModel):
 
 
 class CheckpointingConfig(BaseModel):
-    """Checkpointing configuration."""
+    """Checkpointing configuration.
+
+    Uses unified checkpoints that contain both server and client state,
+    enabling mid-round recovery from crashes.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -174,7 +178,23 @@ class CheckpointingConfig(BaseModel):
     @field_validator("resume_from", mode="before")
     @classmethod
     def validate_resume_path(cls, v: Optional[str]) -> Optional[str]:
+        """Validate resume_from path or keyword.
+
+        Accepts:
+            - "last": Resolves to {run_dir}/checkpoints/last.pt (at runtime)
+            - "best": Resolves to {run_dir}/checkpoints/best.pt (at runtime)
+            - Absolute path: Validated for existence at config load time
+            - Empty/None: No checkpoint resumption (fresh start)
+
+        Note: Keywords are resolved by the server factory, not here,
+        because run_dir is not known at config validation time.
+        """
         if v is not None and v.strip():
+            # Allow special keywords (resolved later by server factory)
+            if v.lower() in ["last", "best"]:
+                return v.lower()
+
+            # For explicit paths, validate existence immediately
             path = Path(v)
             if not path.exists():
                 raise ValueError(f"resume_from path does not exist: {v}")

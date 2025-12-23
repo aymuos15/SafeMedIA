@@ -11,12 +11,12 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import flwr as fl
-from flwr.common import Parameters, Scalar
+from flwr.common import Parameters, Scalar, parameters_to_ndarrays
 from flwr.server.strategy import FedAvg
 from loguru import logger
 
 from ...privacy.accountant import PrivacyAccountant
-from ..checkpoint import CheckpointManager
+from ..checkpoint import UnifiedCheckpointManager, ClientState
 
 
 class DPFedAvg(FedAvg):
@@ -35,6 +35,10 @@ class DPFedAvg(FedAvg):
         user_max_grad_norm: float = 0.0,
         total_clients: int = 10,
         start_round: int = 1,
+        local_epochs: int = 5,
+        checkpoint_manager: Optional[UnifiedCheckpointManager] = None,
+        client_resume_states: Optional[Dict[int, ClientState]] = None,
+        is_mid_round_resume: bool = False,
         **kwargs,
     ):
         """Initialize DP-aware FedAvg.
@@ -51,6 +55,10 @@ class DPFedAvg(FedAvg):
             user_max_grad_norm: Clipping norm for user-level DP
             total_clients: Total number of clients in the population
             start_round: Starting round number (for checkpoint resumption)
+            local_epochs: Number of local epochs per round
+            checkpoint_manager: Unified checkpoint manager (created externally)
+            client_resume_states: Client states for mid-round resume
+            is_mid_round_resume: Whether this is a mid-round resume
             **kwargs: Additional arguments for FedAvg
         """
         super().__init__(**kwargs)
@@ -67,24 +75,58 @@ class DPFedAvg(FedAvg):
         self.user_max_grad_norm = user_max_grad_norm
         self.total_clients = total_clients
         self.start_round = start_round
+        self.local_epochs = local_epochs
 
         # Server-level round metrics
         self.server_rounds: List[Dict[str, Any]] = []
         # Per-client metrics: {client_id: [round_metrics]}
         self.client_metrics: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
 
-        # Checkpointing via CheckpointManager
-        self.checkpoint_dir = self.run_dir / "checkpoints"
-        self.checkpoint_manager = CheckpointManager(self.checkpoint_dir, mode="server")
+        # Unified checkpointing
+        self.checkpoint_dir = self.run_dir.parent / "checkpoints"
+        if checkpoint_manager is not None:
+            self.checkpoint_manager = checkpoint_manager
+        else:
+            self.checkpoint_manager = UnifiedCheckpointManager(
+                checkpoint_dir=self.checkpoint_dir,
+                run_name=run_name,
+                num_rounds=num_rounds or 5,
+                target_delta=target_delta,
+            )
+
         self.latest_parameters: Optional[Parameters] = None
         self.current_round: int = 0  # Track actual round number
+
+        # Resume state
+        self.client_resume_states = client_resume_states or {}
+        self.is_mid_round_resume = is_mid_round_resume
+        self._resume_round = start_round if is_mid_round_resume else 0
 
         self.start_time = datetime.now().isoformat()
 
         logger.info(f"DPFedAvg initialized. Target δ = {target_delta}")
         if start_round > 1:
             logger.info(f"Resuming from round {start_round}")
+        if is_mid_round_resume:
+            logger.info(
+                f"Mid-round resume: {len(self.client_resume_states)} client states loaded"
+            )
         logger.info(f"Results will be saved to: {self.run_dir.absolute()}")
+
+    def initialize_checkpoint(self, parameters: Parameters) -> None:
+        """Initialize checkpoint for a fresh run.
+
+        Args:
+            parameters: Initial global model parameters
+        """
+        if self.checkpoint_manager.get_current_checkpoint() is None:
+            params_ndarrays = parameters_to_ndarrays(parameters)
+            self.checkpoint_manager.create_initial_checkpoint(
+                parameters=params_ndarrays,
+                num_clients=self.total_clients,
+                local_epochs=self.local_epochs,
+            )
+            logger.info("Initialized unified checkpoint for fresh run")
 
     def configure_fit(self, server_round: int, parameters, client_manager):
         """Configure fit round with pre-computed noise multiplier."""
@@ -92,11 +134,33 @@ class DPFedAvg(FedAvg):
         actual_round = self.start_round + server_round - 1
         self.current_round = actual_round
 
+        # Initialize or update checkpoint for this round
+        if parameters is not None:
+            if server_round == 1 and not self.is_mid_round_resume:
+                # Fresh run - initialize checkpoint
+                self.initialize_checkpoint(parameters)
+            elif not self.is_mid_round_resume:
+                # New round (not mid-round resume) - start next round in checkpoint
+                self.checkpoint_manager.start_next_round(
+                    actual_round, self.local_epochs
+                )
+
         # Ensure values are Scalar (int, float, str, bytes, bool)
         config: Dict[str, Scalar] = {
             "noise_multiplier": float(self.noise_multiplier),
             "server_round": int(actual_round),
+            "local_epochs": int(self.local_epochs),
         }
+
+        # Check for mid-round resume
+        if self.is_mid_round_resume and actual_round == self._resume_round:
+            config["resume_from_checkpoint"] = True
+            # Save checkpoint path for clients to load their state
+            checkpoint_path = self.checkpoint_dir / "last.pt"
+            config["checkpoint_path"] = str(checkpoint_path)
+            logger.info(f"Mid-round resume signaled for round {actual_round}")
+        else:
+            config["resume_from_checkpoint"] = False
 
         # Get standard sample
         sample_size, min_num_clients = self.num_fit_clients(
@@ -325,25 +389,49 @@ class DPFedAvg(FedAvg):
 
         return loss_aggregated, metrics_aggregated
 
-    def _save_checkpoints(self, current_dice: float) -> None:
-        """Save model checkpoints (best + last).
+    def _save_checkpoints(self, current_dice: float) -> bool:
+        """Save unified checkpoint after round evaluation.
 
         Args:
             current_dice: Current aggregated dice score
+
+        Returns:
+            True if checkpoint was saved successfully, False otherwise
         """
         if self.latest_parameters is None:
-            logger.warning("No parameters to checkpoint")
-            return
+            logger.error(
+                "No parameters to checkpoint - this may indicate a training failure"
+            )
+            return False
 
-        self.checkpoint_manager.save(
-            model_or_params=self.latest_parameters,
-            dice_score=current_dice,
-            round_num=self.current_round,
-            cumulative_epsilon=self.privacy_accountant.get_cumulative_sample_epsilon(),
-            extra_metadata={
-                "cumulative_user_epsilon": self.privacy_accountant.get_cumulative_user_epsilon()
-            },
-        )
+        # Convert parameters to numpy arrays
+        params_ndarrays = parameters_to_ndarrays(self.latest_parameters)
+
+        try:
+            # Update server state in checkpoint manager
+            self.checkpoint_manager.update_server_state(
+                parameters=params_ndarrays,
+                metrics={"dice": current_dice},
+                round_num=self.current_round,
+                cumulative_sample_epsilon=self.privacy_accountant.get_cumulative_sample_epsilon(),
+                cumulative_user_epsilon=self.privacy_accountant.get_cumulative_user_epsilon(),
+            )
+
+            # Mark round as completed
+            self.checkpoint_manager.mark_round_completed(current_dice)
+
+            # Save checkpoint
+            self.checkpoint_manager.save()
+
+            # Clear mid-round resume flag after first successful round
+            if self.is_mid_round_resume:
+                self.is_mid_round_resume = False
+                logger.info("Mid-round resume completed, future rounds start fresh")
+
+            return True
+        except Exception as e:
+            logger.error(f"Failed to save checkpoint: {e}")
+            return False
 
     def save_logs(self) -> None:
         """Save metrics.json and history.json to run directory."""

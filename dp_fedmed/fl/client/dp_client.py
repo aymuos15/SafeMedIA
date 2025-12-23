@@ -7,7 +7,7 @@ with differential privacy using Opacus.
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Tuple, cast
+from typing import Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -22,6 +22,7 @@ from loguru import logger
 
 from ...models.unet2d import create_unet2d, get_parameters, set_parameters
 from ..task import train_one_epoch, evaluate
+from ..checkpoint import load_unified_checkpoint, ClientState
 
 
 class DPFlowerClient(NumPyClient):
@@ -83,11 +84,40 @@ class DPFlowerClient(NumPyClient):
 
     def get_parameters(self, config: Dict[str, Scalar]) -> NDArrays:
         """Get model parameters."""
-        return get_parameters(cast(nn.Module, self.model))
+        return get_parameters(self.model)
 
     def set_parameters(self, parameters: NDArrays) -> None:
         """Set model parameters."""
-        set_parameters(cast(nn.Module, self.model), parameters)
+        set_parameters(self.model, parameters)
+
+    def _load_resume_state(self, config: Dict[str, Scalar]) -> Optional[ClientState]:
+        """Load client state from checkpoint for mid-round resume.
+
+        Args:
+            config: Training configuration with checkpoint info
+
+        Returns:
+            ClientState if resuming, None otherwise
+        """
+        resume_from_checkpoint = bool(config.get("resume_from_checkpoint", False))
+        if not resume_from_checkpoint:
+            return None
+
+        checkpoint_path = config.get("checkpoint_path")
+        if not checkpoint_path:
+            logger.warning("Resume signaled but no checkpoint path provided")
+            return None
+
+        try:
+            checkpoint = load_unified_checkpoint(Path(str(checkpoint_path)))
+            client_state = checkpoint.clients.get(self.client_id)
+            if client_state is None:
+                logger.warning(f"No state for client {self.client_id} in checkpoint")
+                return None
+            return client_state
+        except Exception as e:
+            logger.error(f"Failed to load resume state: {e}")
+            return None
 
     def fit(
         self,
@@ -103,11 +133,56 @@ class DPFlowerClient(NumPyClient):
         Returns:
             Tuple of (updated_parameters, num_samples, metrics)
         """
-        # Set global parameters
-        self.set_parameters(parameters)
+        # Check for mid-round resume
+        resume_state = self._load_resume_state(config)
+        start_epoch = 0
+        accumulated_loss = 0.0
+
+        if resume_state is not None:
+            # Check if client already completed this round
+            if (
+                resume_state.epoch.status == "completed"
+                and resume_state.final_parameters is not None
+            ):
+                logger.info(
+                    f"Client {self.client_id} already completed round, returning cached results"
+                )
+                metrics: Dict[str, Scalar] = dict(resume_state.final_metrics or {})
+                return (
+                    resume_state.final_parameters,
+                    resume_state.num_samples,
+                    metrics,
+                )
+
+            # Resume from saved epoch
+            start_epoch = resume_state.epoch.current
+            accumulated_loss = resume_state.partial_metrics.get("loss_sum", 0.0)
+
+            # Load saved model state
+            if resume_state.model_state is not None:
+                try:
+                    if isinstance(self.model, GradSampleModule):
+                        self.model = self.model.to_standard_module()
+                    self.model.load_state_dict(resume_state.model_state)
+                    logger.info(
+                        f"Resumed client {self.client_id} from epoch {start_epoch}"
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to load model state, starting fresh: {e}")
+                    start_epoch = 0
+                    accumulated_loss = 0.0
+                    self.set_parameters(parameters)
+            else:
+                # No model state saved, start fresh
+                self.set_parameters(parameters)
+        else:
+            # Normal case: use global parameters
+            self.set_parameters(parameters)
 
         # Get training parameters
-        local_epochs = int(self.training_config.get("local_epochs", 1))
+        local_epochs = int(
+            config.get("local_epochs", self.training_config.get("local_epochs", 1))
+        )
         lr = float(self.training_config.get("learning_rate", 0.001))
         momentum = float(self.training_config.get("momentum", 0.9))
 
@@ -124,13 +199,11 @@ class DPFlowerClient(NumPyClient):
         noise_multiplier = float(config.get("noise_multiplier", 1.0))
 
         logger.info(
-            f"Round {config.get('server_round', '?')}: Style={privacy_style}, noise_multiplier={noise_multiplier:.4f}"
+            f"Round {config.get('server_round', '?')}: Style={privacy_style}, "
+            f"noise_multiplier={noise_multiplier:.4f}, epochs={start_epoch}/{local_epochs}"
         )
 
         # CRITICAL: Unwrap model if already wrapped from previous round
-        # Opacus wraps the model with GradSampleModule, which must be unwrapped
-        # before re-wrapping to prevent hook conflicts that cause:
-        # "Per sample gradient is not initialized. Not updated in backward pass?"
         if isinstance(self.model, GradSampleModule):
             logger.debug("Unwrapping GradSampleModule for next round")
             self.model = self.model.to_standard_module()
@@ -155,10 +228,9 @@ class DPFlowerClient(NumPyClient):
             self.privacy_engine = privacy_engine
 
             # Wrap model, optimizer, and data loader with DP
-            # Note: make_private handles GradSampleModule wrapping
             try:
                 model, optimizer, self._dp_train_loader = privacy_engine.make_private(
-                    module=cast(nn.Module, self.model),
+                    module=self.model,
                     optimizer=self.optimizer,
                     data_loader=self.train_loader,
                     noise_multiplier=noise_multiplier,
@@ -168,39 +240,32 @@ class DPFlowerClient(NumPyClient):
                 self.optimizer = optimizer
             except Exception as e:
                 logger.error(f"Failed to make model private: {e}")
-                # Fallback or re-raise
                 raise
 
             train_loader = self._dp_train_loader
-            # Opacus DPDataLoader has sample_rate
             sample_rate = getattr(self._dp_train_loader, "sample_rate", 0.0)
             if train_loader is None:
                 raise ValueError("DP training loader is None after make_private")
-            steps = len(train_loader) * local_epochs
+            # Steps from start_epoch onwards
+            steps = len(train_loader) * (local_epochs - start_epoch)
             logger.info(
                 f"Sample-level DP enabled: noise={noise_multiplier}, clip={max_grad_norm}"
             )
         else:
             train_loader = self.train_loader
             sample_rate = 0.0
-            steps = len(train_loader) * local_epochs
+            steps = len(train_loader) * (local_epochs - start_epoch)
             logger.info(f"Sample-level DP disabled (style: {privacy_style})")
 
-        # Set up checkpoint directory
-        checkpoint_dir = None
-        if self.run_dir:
-            checkpoint_dir = self.run_dir / "checkpoints"
-
-        # Training loop
-        total_loss = 0.0
-        for epoch in range(local_epochs):
+        # Training loop (from start_epoch to local_epochs)
+        total_loss = accumulated_loss
+        for epoch in range(start_epoch, local_epochs):
             epoch_loss = train_one_epoch(
-                cast(nn.Module, self.model),
+                self.model,
                 train_loader,
                 self.optimizer,
                 self.device,
                 loss_config=self.loss_config,
-                checkpoint_dir=checkpoint_dir,
             )
             total_loss += epoch_loss
             logger.debug(
@@ -214,9 +279,9 @@ class DPFlowerClient(NumPyClient):
                 f"Training complete. Privacy spent: ε = {epsilon:.4f}, δ = {target_delta}"
             )
         else:
-            logger.info(
-                f"Training complete. Average loss: {total_loss / local_epochs:.4f}"
-            )
+            completed_epochs = local_epochs - start_epoch
+            avg_loss = (total_loss - accumulated_loss) / max(completed_epochs, 1)
+            logger.info(f"Training complete. Average loss: {avg_loss:.4f}")
 
         # Store round metrics
         try:
@@ -244,7 +309,7 @@ class DPFlowerClient(NumPyClient):
             num_fit_samples = 0
 
         return (
-            get_parameters(cast(nn.Module, self.model)),
+            get_parameters(self.model),
             num_fit_samples,
             {
                 "loss": float(total_loss / local_epochs),
@@ -271,16 +336,10 @@ class DPFlowerClient(NumPyClient):
         """
         self.set_parameters(parameters)
 
-        # Set up checkpoint directory
-        checkpoint_dir = None
-        if self.run_dir:
-            checkpoint_dir = self.run_dir / "checkpoints"
-
         metrics = evaluate(
-            cast(nn.Module, self.model),
+            self.model,
             self.test_loader,
             self.device,
-            checkpoint_dir=checkpoint_dir,
         )
 
         logger.debug(
@@ -314,7 +373,6 @@ class DPFlowerClient(NumPyClient):
                 "eval_loss": float(metrics["loss"]),
             }
             self.round_history.append(placeholder)
-            # logger.debug(f"Created placeholder for Round {server_round} in evaluate") # Silenced to avoid log noise
 
         # Save client metrics after evaluation
         self._save_client_metrics()
@@ -341,8 +399,12 @@ class DPFlowerClient(NumPyClient):
                     with open(history_path, "r") as f:
                         data = json.load(f)
                         self.round_history = data.get("rounds", [])
-                except Exception:
-                    logger.debug("No existing history found to load")
+                except FileNotFoundError:
+                    logger.debug("No history file found")
+                except json.JSONDecodeError as e:
+                    logger.warning(f"Corrupted history file, starting fresh: {e}")
+                except Exception as e:
+                    logger.error(f"Unexpected error loading history: {e}")
 
     def _save_client_metrics(self) -> None:
         """Save client-specific metrics and history."""
