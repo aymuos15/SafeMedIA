@@ -12,7 +12,7 @@ import torch
 import torch.nn as nn
 
 from dp_fedmed.models.unet2d import create_unet2d
-from dp_fedmed.fl.ssl.checkpoint import save_pretrained_checkpoint
+from dp_fedmed.fl.checkpoint import save_pretrained_checkpoint
 from dp_fedmed.fl.ssl.config import SSLConfig
 from dp_fedmed.fl.ssl.task import train_epoch_ssl
 from dp_fedmed.fl.ssl.model import SSLUNet

@@ -1,4 +1,10 @@
-"""Checkpoint utilities for saving and loading pretrained encoders."""
+"""Checkpoint utilities for saving and loading pretrained encoders.
+
+This module provides functions for transfer learning workflows:
+- Saving pretrained model checkpoints from SSL pretraining
+- Loading pretrained encoder weights into downstream models
+- Freezing encoder parameters for fine-tuning
+"""
 
 import torch
 import torch.nn as nn

@@ -20,6 +20,11 @@ from .io import (
     resolve_checkpoint_path,
 )
 from .manager import UnifiedCheckpointManager
+from .pretrained import (
+    save_pretrained_checkpoint,
+    load_pretrained_encoder,
+    load_encoder_for_downstream,
+)
 
 __all__ = [
     "CHECKPOINT_VERSION",
@@ -34,4 +39,7 @@ __all__ = [
     "load_unified_checkpoint",
     "resolve_checkpoint_path",
     "UnifiedCheckpointManager",
+    "save_pretrained_checkpoint",
+    "load_pretrained_encoder",
+    "load_encoder_for_downstream",
 ]

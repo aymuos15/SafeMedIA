@@ -15,7 +15,7 @@ from pathlib import Path
 
 from dp_fedmed.fl.ssl.config import SSLConfig, AugmentationConfig
 from dp_fedmed.fl.ssl.model import SSLUNet
-from dp_fedmed.fl.ssl.checkpoint import (
+from dp_fedmed.fl.checkpoint import (
     save_pretrained_checkpoint,
     load_pretrained_encoder,
 )

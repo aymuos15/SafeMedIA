@@ -15,7 +15,7 @@ from loguru import logger
 from dp_fedmed.models.unet2d import create_unet2d
 from dp_fedmed.fl.base.client import BaseFlowerClient
 from dp_fedmed.fl.task import train_one_epoch, evaluate
-from dp_fedmed.fl.ssl.checkpoint import load_pretrained_encoder
+from dp_fedmed.fl.checkpoint import load_pretrained_encoder
 
 
 class DPFlowerClient(BaseFlowerClient):
